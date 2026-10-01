@@ -58,6 +58,57 @@ export function readTail(path: string, maxBytes: number = DEFAULT_TAIL_BYTES): T
   }
 }
 
+export interface FullOutput {
+  content: string;
+  /** True when `content` omits the middle of the log. */
+  truncated: boolean;
+  bytes: number;
+}
+
+/**
+ * The whole log, for callers that can take more than the model-facing tail
+ * (pi 0.99 hands a tool's `structuredContent` to codemode scripts). A log
+ * over `maxBytes` keeps its first and last `maxBytes / 2` bytes around an
+ * omission marker, cut at character boundaries — the same shape pi's own
+ * bash gives scripts, so a script written for it reads ours unchanged.
+ */
+export function readFull(path: string, maxBytes: number): FullOutput {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return { content: "", truncated: false, bytes: 0 };
+  }
+  try {
+    const size = fstatSync(fd).size;
+    if (size === 0) return { content: "", truncated: false, bytes: 0 };
+    const readAt = (start: number, len: number): Buffer => {
+      const buf = Buffer.allocUnsafe(len);
+      let read = 0;
+      while (read < len) {
+        const n = readSync(fd, buf, read, len - read, start + read);
+        if (n <= 0) break;
+        read += n;
+      }
+      return buf.subarray(0, read);
+    };
+    if (size <= maxBytes) return { content: readAt(0, size).toString("utf8"), truncated: false, bytes: size };
+    const headBytes = Math.floor(maxBytes / 2);
+    const tailBytes = maxBytes - headBytes;
+    const head = new TextDecoder().decode(readAt(0, headBytes), { stream: true });
+    let tail = readAt(size - tailBytes, tailBytes);
+    let i = 0;
+    while (i < tail.length && (tail[i]! & 0xc0) === 0x80) i++;
+    tail = tail.subarray(i);
+    const omitted = size - headBytes - tailBytes;
+    return { content: `${head}\n\n[... ${omitted} bytes omitted ...]\n\n${tail.toString("utf8")}`, truncated: true, bytes: size };
+  } catch {
+    return { content: "", truncated: false, bytes: 0 };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** Non-empty line count of a chunk of text. */
 export function countLines(text: string): number {
   if (!text) return 0;

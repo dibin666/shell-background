@@ -418,3 +418,37 @@ test("shell_status wait blocks until a running job finishes (finding f075)", asy
     await rmDir(regDir);
   }
 });
+
+test("pi 0.99: results carry structuredContent for scripts — exit_code once finished, absent while running", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sbg-struct-"));
+  const { id: sid, regDir } = uniqueSession();
+  const h = harness();
+  const ctx = makeCtx(cwd, false, sid);
+  try {
+    shellBackground(h.pi);
+    await h.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctx);
+    const bash = h.tools.get("bash")!;
+    assert.ok((bash as { outputSchema?: unknown }).outputSchema, "the tool declares its outputSchema");
+
+    const done = await bash.execute("t1", { command: "echo structured-ok" }, undefined, undefined, ctx);
+    const sc = done.structuredContent as { output: string; exit_code?: number; status: string; job_id: string; truncated: boolean };
+    assert.match(sc.output, /structured-ok/);
+    assert.equal(sc.exit_code, 0);
+    assert.equal(sc.status, "done");
+    assert.equal(sc.truncated, false);
+    assert.match(sc.job_id, /^bg-/);
+
+    const bg = await bash.execute("t2", { command: "sleep 2", background: true }, undefined, undefined, ctx);
+    const running = bg.structuredContent as { status: string; exit_code?: number; job_id: string };
+    assert.equal(running.status, "running");
+    assert.equal("exit_code" in running, false);
+    const status = h.tools.get("shell_status")!;
+    await waitFor(async () => (await status.execute("p", { id: running.job_id })).details.status !== "running", 6000);
+    const collected = await status.execute("c", { id: running.job_id });
+    assert.equal((collected.structuredContent as { exit_code?: number }).exit_code, 0);
+  } finally {
+    await teardown(h, ctx);
+    await rmDir(cwd);
+    await rmDir(regDir);
+  }
+});

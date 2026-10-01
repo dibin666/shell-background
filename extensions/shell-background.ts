@@ -48,13 +48,21 @@ import { DEFAULT_SETTINGS, resolveSettings, type ShellBgSettings } from "../src/
 import { backgroundedResult, deliveryMessage, DELIVERY_TYPE } from "../src/pending.ts";
 import { formatResult, formatList, header } from "../src/format.ts";
 import { sanitizeOutput } from "../src/sanitize.ts";
+import { readFull } from "../src/tail.ts";
+import { STRUCTURED_OUTPUT_MAX_BYTES, bashOutputSchema, buildStructured, type BashStructured } from "../src/structured.ts";
 import { buildWidgetLines } from "../src/widget.ts";
 import { isFinished } from "../src/types.ts";
 import type { Job } from "../src/types.ts";
 
 type UiContext = ExtensionContext;
 type AnyTool = { name: string; execute: (...a: never[]) => unknown; [k: string]: unknown };
-type ToolResult = { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown>; isError?: boolean };
+type ToolResult = {
+  content: Array<{ type: "text"; text: string }>;
+  details: Record<string, unknown>;
+  /** pi 0.99: what codemode scripts and ctx.executeTool() callers receive instead of the text. */
+  structuredContent?: BashStructured;
+  isError?: boolean;
+};
 
 const WIDGET = "shell-bg";
 
@@ -193,10 +201,16 @@ export default function shellBackground(pi: ExtensionAPI) {
     };
   }
 
+  /** The structured half of any result about a job: the whole log (bounded) plus status, for scripts. */
+  function structured(job: Job): BashStructured {
+    return buildStructured(job, readFull(job.logPath, STRUCTURED_OUTPUT_MAX_BYTES));
+  }
+
   function finished(job: Job): ToolResult {
     return {
       content: [{ type: "text", text: formatResult(job, settings.tailBytes) }],
       details: { id: job.id, status: job.status, exitCode: job.exitCode, signal: job.signal, background: false },
+      structuredContent: structured(job),
       isError: job.status === "failed",
     };
   }
@@ -314,7 +328,7 @@ export default function shellBackground(pi: ExtensionAPI) {
         interactive: ctx.hasUI,
         collectWith: "shell_status",
       });
-      return { content: [{ type: "text", text: r.text }], details: r.details };
+      return { content: [{ type: "text", text: r.text }], details: r.details, structuredContent: structured(job) };
     }
 
     // Foreground: race the process against the auto-background threshold, an
@@ -387,7 +401,7 @@ export default function shellBackground(pi: ExtensionAPI) {
           interactive: ctx.hasUI,
           collectWith: "shell_status",
         });
-        return { content: [{ type: "text", text: r.text }], details: r.details };
+        return { content: [{ type: "text", text: r.text }], details: r.details, structuredContent: structured(job) };
       }
 
       // timeout or abort: stop the tree, let the record settle, report partial.
@@ -411,6 +425,7 @@ export default function shellBackground(pi: ExtensionAPI) {
             },
           ],
           details: { id: job.id, status: job.status },
+          structuredContent: structured(job),
           isError: true,
         };
       }
@@ -421,6 +436,7 @@ export default function shellBackground(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: formatResult(job, settings.tailBytes) + note }],
         details: { id: job.id, status: job.status },
+        structuredContent: structured(job),
         isError: true,
       };
     } finally {
@@ -466,6 +482,10 @@ export default function shellBackground(pi: ExtensionAPI) {
         ),
       }),
       promptGuidelines: guidelines,
+      // pi 0.99: scripts and ctx.executeTool() callers receive structuredContent
+      // instead of the text. Same fields as pi's bash, plus status/job_id;
+      // exit_code is absent while the command still runs in the background.
+      outputSchema: bashOutputSchema,
       // Let pi render the result with its default text renderer; keep the call
       // renderer (it only needs the command) if the original had one.
       renderResult: undefined,
@@ -514,6 +534,7 @@ export default function shellBackground(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: formatResult(job, settings.tailBytes) }],
         details: { id: job.id, status: job.status, exitCode: job.exitCode },
+        structuredContent: structured(job),
       };
     },
   });

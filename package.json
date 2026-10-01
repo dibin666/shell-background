@@ -1,6 +1,6 @@
 {
   "name": "@pify/shell-background",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Long-running bash goes async: background: true launches detached, and any command still running after 30s auto-backgrounds and delivers its result when it finishes",
   "keywords": [
     "pi-package",
@@ -63,9 +63,9 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.87.0",
-    "@earendil-works/pi-coding-agent": "^0.87.0",
-    "@earendil-works/pi-tui": "^0.87.0",
+    "@earendil-works/pi-ai": "^0.99.0",
+    "@earendil-works/pi-coding-agent": "^0.99.0",
+    "@earendil-works/pi-tui": "^0.99.0",
     "@types/node": "^22.10.2",
     "typebox": "^1.1.38",
     "typescript": "^5.7.2"
