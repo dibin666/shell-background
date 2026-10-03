@@ -23,15 +23,25 @@ export interface ShellBgSettings {
    * — a command itself is never refused.
    */
   maxBackground: number;
+  /**
+   * Whether a finished background job pushes its result into the conversation
+   * (and triggers a new agent turn that explains it). false: the job still
+   * finishes, the widget updates, and shell_status collects the result, but
+   * nothing is injected and the agent is not woken.
+   */
+  deliverResults: boolean;
 }
 
 export const DEFAULT_SETTINGS: ShellBgSettings = {
   autoBackgroundMs: 30_000,
   tailBytes: 64 * 1024,
   maxBackground: 8,
+  deliverResults: true,
 };
 
-const LIMITS: Record<keyof ShellBgSettings, { min: number; max: number }> = {
+type NumericKey = Exclude<keyof ShellBgSettings, "deliverResults">;
+
+const LIMITS: Record<NumericKey, { min: number; max: number }> = {
   // 0 is allowed (disable); otherwise at least 1s so a typo of "30" (=30ms)
   // does not make every command look long-running.
   autoBackgroundMs: { min: 0, max: 3_600_000 },
@@ -55,7 +65,12 @@ export function resolveSettings(
           warnings.push(`unknown setting "${key}"`);
           continue;
         }
-        const name = key as keyof ShellBgSettings;
+        if (key === "deliverResults") {
+          if (typeof value === "boolean") settings.deliverResults = value;
+          else warnings.push(`"deliverResults" must be true or false — using ${DEFAULT_SETTINGS.deliverResults}`);
+          continue;
+        }
+        const name = key as NumericKey;
         if (typeof value !== "number" || !Number.isFinite(value)) {
           warnings.push(`"${key}" must be a number — using ${DEFAULT_SETTINGS[name]}`);
           continue;
@@ -75,7 +90,7 @@ export function resolveSettings(
   return { settings, warnings };
 }
 
-function clamp(name: keyof ShellBgSettings, value: number, warnings: string[]): number {
+function clamp(name: NumericKey, value: number, warnings: string[]): number {
   const { min, max } = LIMITS[name];
   const c = Math.round(Math.min(max, Math.max(min, value)));
   if (c !== value) warnings.push(`"${name}" clamped to ${c} (allowed ${min}–${max})`);

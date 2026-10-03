@@ -1,23 +1,18 @@
 name: Release
 
-# Publish to npm when a version tag is pushed:
+# Build and publish a GitHub Release (with the npm tarball attached) when a
+# version tag is pushed:
 #   npm version patch && git push --follow-tags
-#
-# Auth: NPM_TOKEN org secret (pifydev org, visibility all). First publish
-# creates the package; afterwards a Trusted Publisher can be configured on
-# npmjs.com and this workflow switched to OIDC like pifydev/cli.
 on:
   push:
     tags: ["v*"]
 
-permissions: {}
+permissions:
+  contents: write
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write # npm provenance
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -26,10 +21,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
       - run: bun install --frozen-lockfile
       - run: bunx tsc --noEmit
       - run: bun test
-      - run: npm publish --provenance --access public
+      - run: npm pack
+      - run: gh release create "$GITHUB_REF_NAME" ./*.tgz --generate-notes --title "$GITHUB_REF_NAME"
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
