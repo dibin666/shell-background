@@ -48,3 +48,14 @@ test("PIFY_SHELL_BG_MS overrides the threshold", () => {
   assert.equal(bad.settings.autoBackgroundMs, DEFAULT_SETTINGS.autoBackgroundMs);
   assert.ok(bad.warnings.some((w) => w.includes("not a number")));
 });
+
+test("deliverResults defaults to true and accepts a boolean", () => {
+  assert.equal(resolveSettings(undefined, {}).settings.deliverResults, true);
+  assert.equal(resolveSettings({ deliverResults: false }, {}).settings.deliverResults, false);
+});
+
+test("a non-boolean deliverResults warns and keeps the default", () => {
+  const { settings, warnings } = resolveSettings({ deliverResults: "no" }, {});
+  assert.equal(settings.deliverResults, true);
+  assert.ok(warnings.some((w) => w.includes("deliverResults")));
+});

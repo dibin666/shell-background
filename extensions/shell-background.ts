@@ -218,6 +218,7 @@ export default function shellBackground(pi: ExtensionAPI) {
   /** Push a finished job's result into the conversation through the live pi. */
   function deliver(job: Job): void {
     renderWidget();
+    if (!settings.deliverResults) return;
     pi.sendMessage(
       {
         customType: DELIVERY_TYPE,

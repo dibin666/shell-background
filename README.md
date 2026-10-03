@@ -54,11 +54,12 @@ Put these in `.pi/shell-background.json` (project) or `<agentDir>/shell-backgrou
 {
   "autoBackgroundMs": 30000,
   "tailBytes": 65536,
-  "maxBackground": 8
+  "maxBackground": 8,
+  "deliverResults": true
 }
 ```
 
-`autoBackgroundMs` is how long a foreground command may run before it auto-backgrounds; set it to `0` to disable auto-background (explicit `background: true` still works). `PIFY_SHELL_BG_MS` overrides it for one run or in CI. `tailBytes` bounds how much of a job's log a status result shows. `maxBackground` bounds how many jobs may be alive at once: over it, a `background: true` request is refused with a message naming the limit (the command can still run in the foreground), and a command that crosses the auto-background threshold simply stays in the foreground instead of moving — a command is never refused, only the decision to background it. Bad values fall back to the defaults with a warning rather than taking the tool down.
+`autoBackgroundMs` is how long a foreground command may run before it auto-backgrounds; set it to `0` to disable auto-background (explicit `background: true` still works). `PIFY_SHELL_BG_MS` overrides it for one run or in CI. `tailBytes` bounds how much of a job's log a status result shows. `maxBackground` bounds how many jobs may be alive at once: over it, a `background: true` request is refused with a message naming the limit (the command can still run in the foreground), and a command that crosses the auto-background threshold simply stays in the foreground instead of moving — a command is never refused, only the decision to background it. `deliverResults` (boolean, default `true`): when a background job finishes, its result is pushed into the conversation and wakes the agent for a new turn. Set it to `false` to turn that off — the widget still updates and `shell_status {id}` still collects the result, but nothing is injected and the agent is not woken. Bad values fall back to the defaults with a warning rather than taking the tool down.
 
 Since pi 0.99 the bash tool also returns a machine-readable result — `structuredContent` — which codemode scripts and tools calling `ctx.executeTool("bash", …)` receive instead of the text. This package keeps pi's shape so such a script reads either tool unchanged: `output` (the whole log, up to 1 MiB, head and tail around an omission marker), `truncated`, `full_output_path`, `exit_code`, `wall_time_seconds` — plus `status` and `job_id`, because a command here can still be running when the tool returns; then `exit_code` is absent and `shell_status {id}` collects it, with the same structured result.
 
