@@ -70,6 +70,8 @@ export interface Shrunk {
   total: number;
 }
 
+import { keepNonRedundant } from "./redundancy.ts";
+
 export const DEFAULT_SHRINK: Required<ShrinkOptions> = { head: 3, tail: 100, maxLines: 200 };
 
 function levelSummary(lines: string[]): string {
@@ -101,6 +103,10 @@ export function shrinkLines(text: string, opts: ShrinkOptions = {}): Shrunk {
   const total = lines.length;
   if (maxLines <= 0 || total <= maxLines) return { text, omitted: 0, total };
   const keep = lines.map((line, i) => i < head || i >= total - tail || isImportantLine(line));
+  // Before collapsing, keep one representative of every DISTINCT line a run is
+  // about to drop, so a document of unique lines is not truncated — only true
+  // repetition is elided (caveman's redundancy guard).
+  keepNonRedundant(lines, keep);
   const out: string[] = [];
   let omitted = 0;
   let i = 0;

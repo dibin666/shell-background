@@ -6,6 +6,7 @@ import type { Job } from "./types.ts";
 import { readTail } from "./tail.ts";
 import { sanitizeOutput } from "./sanitize.ts";
 import { DEFAULT_SHRINK, shrinkLines } from "./shrink.ts";
+import { parseTestReport, renderTestReport } from "./testreport.ts";
 
 function kb(bytes: number): string {
   return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))}KB` : `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
@@ -60,6 +61,17 @@ export function formatResult(job: Job, tailBytes: number, tailLines: number = DE
   if (text.trim() === "") {
     lines.push(job.status === "running" ? "(no output yet)" : "(no output)");
     return lines.join("\n");
+  }
+  // A whole JSON test report (pytest --json-report, jest --json) read from the
+  // tail becomes counts + every failure. Only when the tail holds the whole
+  // document — a truncated one is not valid JSON and falls through to the
+  // line view. The full report stays on disk.
+  if (!tail.truncated) {
+    const report = parseTestReport(text);
+    if (report) {
+      lines.push(renderTestReport(report));
+      return lines.join("\n");
+    }
   }
   const shrunk = shrinkLines(text, { maxLines: tailLines, tail: Math.max(DEFAULT_SHRINK.tail, Math.floor(tailLines / 2)) });
   const notes: string[] = [];
