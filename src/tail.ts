@@ -20,6 +20,8 @@ export interface Tail {
   truncated: boolean;
   /** Total size of the file in bytes. */
   bytes: number;
+  /** True when the log could not be opened at all — distinct from a command that printed nothing. */
+  missing?: boolean;
 }
 
 export const DEFAULT_TAIL_BYTES = 64 * 1024;
@@ -29,7 +31,7 @@ export function readTail(path: string, maxBytes: number = DEFAULT_TAIL_BYTES): T
   try {
     fd = openSync(path, "r");
   } catch {
-    return { text: "", truncated: false, bytes: 0 };
+    return { text: "", truncated: false, bytes: 0, missing: true };
   }
   try {
     const size = fstatSync(fd).size;

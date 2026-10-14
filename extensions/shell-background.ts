@@ -208,7 +208,7 @@ export default function shellBackground(pi: ExtensionAPI) {
 
   function finished(job: Job): ToolResult {
     return {
-      content: [{ type: "text", text: formatResult(job, settings.tailBytes) }],
+      content: [{ type: "text", text: formatResult(job, settings.tailBytes, settings.tailLines) }],
       details: { id: job.id, status: job.status, exitCode: job.exitCode, signal: job.signal, background: false },
       structuredContent: structured(job),
       isError: job.status === "failed",
@@ -221,7 +221,7 @@ export default function shellBackground(pi: ExtensionAPI) {
     pi.sendMessage(
       {
         customType: DELIVERY_TYPE,
-        content: deliveryMessage(job.id, formatResult(job, settings.tailBytes)),
+        content: deliveryMessage(job.id, formatResult(job, settings.tailBytes, settings.tailLines)),
         display: true,
         details: { id: job.id, status: job.status, exitCode: job.exitCode },
       },
@@ -432,7 +432,7 @@ export default function shellBackground(pi: ExtensionAPI) {
             {
               type: "text",
               text:
-                formatResult(job, settings.tailBytes) +
+                formatResult(job, settings.tailBytes, settings.tailLines) +
                 `\n\n[kill signal sent; process had not exited after 3s — shell_status ${job.id} to confirm]`,
             },
           ],
@@ -446,7 +446,7 @@ export default function shellBackground(pi: ExtensionAPI) {
           ? `\n\n[killed: exceeded the ${params.timeout}s timeout]`
           : `\n\n[killed: the turn was aborted]`;
       return {
-        content: [{ type: "text", text: formatResult(job, settings.tailBytes) + note }],
+        content: [{ type: "text", text: formatResult(job, settings.tailBytes, settings.tailLines) + note }],
         details: { id: job.id, status: job.status },
         structuredContent: structured(job),
         isError: true,
@@ -559,7 +559,7 @@ export default function shellBackground(pi: ExtensionAPI) {
         registry.persist(job);
       }
       return {
-        content: [{ type: "text", text: formatResult(job, settings.tailBytes) }],
+        content: [{ type: "text", text: formatResult(job, settings.tailBytes, settings.tailLines) }],
         details: { id: job.id, status: job.status, exitCode: job.exitCode },
         structuredContent: structured(job),
       };

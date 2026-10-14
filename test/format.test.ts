@@ -44,9 +44,38 @@ test("formatResult shows the header and the output tail", () => {
   }
 });
 
-test("formatResult is honest about no output", () => {
-  assert.match(formatResult(job({ logPath: "/no/such" }), 65536), /\(no output\)/);
-  assert.match(formatResult(job({ logPath: "/no/such", status: "running", endedAt: null }), 65536), /\(no output yet\)/);
+test("formatResult is honest about no output, and about a log it cannot read", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sbg-fmt-"));
+  try {
+    const logPath = join(dir, "empty.log");
+    writeFileSync(logPath, "");
+    assert.match(formatResult(job({ logPath }), 65536), /\(no output\)/);
+    assert.match(formatResult(job({ logPath, status: "running", endedAt: null }), 65536), /\(no output yet\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // A missing log is not a command that printed nothing.
+  assert.match(formatResult(job({ logPath: "/no/such" }), 65536), /\(log unavailable: \/no\/such could not be read\)/);
+});
+
+test("formatResult shrinks a long log by lines, keeps the error in the middle, and says what it left out", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sbg-fmt-"));
+  try {
+    const logPath = join(dir, "build.log");
+    const body = Array.from({ length: 600 }, (_, i) => (i === 300 ? "error TS2304: Cannot find name 'x'" : `INFO step ${i}`));
+    writeFileSync(logPath, body.join("\n") + "\n");
+    const text = formatResult(job({ logPath }), 65536, 200);
+    assert.match(text, /error TS2304/, "the failing step survived in the middle");
+    assert.match(text, /^… \d+ of 600 lines omitted, none with an error or warning .* — full log: /m);
+    assert.match(text, /\[… \d+ lines omitted \(INFO ×\d+\) …\]/);
+    assert.ok(text.includes("INFO step 599"), "the tail is there");
+    assert.ok(text.includes("INFO step 0"), "the head is there");
+    assert.ok(text.split("\n").length < 260, "well under the untouched 600");
+    // tailLines 0 turns shrinking off.
+    assert.ok(formatResult(job({ logPath }), 65536, 0).split("\n").length > 600);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("formatList summarizes running vs total, newest first", () => {

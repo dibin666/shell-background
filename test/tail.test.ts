@@ -54,8 +54,8 @@ test("readTail drops a leading partial UTF-8 char at the cut", () => {
   }
 });
 
-test("readTail on a missing or empty file is empty, not a throw", () => {
-  assert.deepEqual(readTail("/no/such/file/xyz", 100), { text: "", truncated: false, bytes: 0 });
+test("readTail on a missing file is empty and says so; an unreadable log is not a silent command", () => {
+  assert.deepEqual(readTail("/no/such/file/xyz", 100), { text: "", truncated: false, bytes: 0, missing: true });
 });
 
 test("countLines ignores blank lines", () => {

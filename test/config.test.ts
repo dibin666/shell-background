@@ -14,6 +14,14 @@ test("valid overrides are taken", () => {
   assert.equal(settings.tailBytes, 8192);
 });
 
+test("tailLines defaults to 200, accepts 0, clamps to 5000", () => {
+  assert.equal(resolveSettings(undefined, {}).settings.tailLines, 200);
+  assert.equal(resolveSettings({ tailLines: 0 }, {}).settings.tailLines, 0);
+  const { settings, warnings } = resolveSettings({ tailLines: 99_999 }, {});
+  assert.equal(settings.tailLines, 5000);
+  assert.ok(warnings.some((w) => w.includes("tailLines")));
+});
+
 test("0 disables auto-background", () => {
   const { settings } = resolveSettings({ autoBackgroundMs: 0 }, {});
   assert.equal(settings.autoBackgroundMs, 0);

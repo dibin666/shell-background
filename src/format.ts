@@ -3,8 +3,13 @@
  * job and a tail, produce the string — the extension supplies both.
  */
 import type { Job } from "./types.ts";
-import { readTail, countLines } from "./tail.ts";
+import { readTail } from "./tail.ts";
 import { sanitizeOutput } from "./sanitize.ts";
+import { DEFAULT_SHRINK, shrinkLines } from "./shrink.ts";
+
+function kb(bytes: number): string {
+  return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))}KB` : `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
 
 function secs(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -34,22 +39,36 @@ export function header(job: Job): string {
 /**
  * The full result of a finished (or polled) job: the header, then the tail of
  * its output, with an honest note when output was truncated and where the whole
- * log lives.
+ * log lives. The tail is read as bytes (`tailBytes`), cleaned, and then shrunk
+ * by lines (`tailLines`): first and last lines kept, every error/warning line
+ * kept wherever it sits, the rest collapsed into counted markers — so a long
+ * build's failing step survives in the middle instead of only its summary at
+ * the end. The log on disk keeps every byte, and the note says where it is.
  */
-export function formatResult(job: Job, tailBytes: number): string {
+export function formatResult(job: Job, tailBytes: number, tailLines: number = DEFAULT_SHRINK.maxLines): string {
   const tail = readTail(job.logPath, tailBytes);
-  // Cleaned the way pi's own bash cleans its output for the model; the log on
-  // disk (which the truncation note points at) keeps every byte.
-  const text = sanitizeOutput(tail.text);
   const lines = [header(job)];
+  if (tail.missing) {
+    // A log that cannot be read is not a command that printed nothing: say so,
+    // or the model keeps polling for output that will never come.
+    lines.push(`(log unavailable: ${job.logPath} could not be read)`);
+    return lines.join("\n");
+  }
+  // Cleaned the way pi's own bash cleans its output for the model; the log on
+  // disk (which the note points at) keeps every byte.
+  const text = sanitizeOutput(tail.text).replace(/\n+$/, "");
   if (text.trim() === "") {
     lines.push(job.status === "running" ? "(no output yet)" : "(no output)");
-  } else {
-    if (tail.truncated) {
-      lines.push(`… showing the last ${countLines(text)} lines — full log: ${job.logPath}`);
-    }
-    lines.push(text.replace(/\n+$/, ""));
+    return lines.join("\n");
   }
+  const shrunk = shrinkLines(text, { maxLines: tailLines, tail: Math.max(DEFAULT_SHRINK.tail, Math.floor(tailLines / 2)) });
+  const notes: string[] = [];
+  if (shrunk.omitted > 0) {
+    notes.push(`${shrunk.omitted} of ${shrunk.total} lines omitted, none with an error or warning (those are kept wherever they sit)`);
+  }
+  if (tail.truncated) notes.push(`this is the last ${kb(Buffer.byteLength(tail.text, "utf8"))} of a ${kb(tail.bytes)} log`);
+  if (notes.length > 0) lines.push(`… ${notes.join("; ")} — full log: ${job.logPath}`);
+  lines.push(shrunk.text);
   return lines.join("\n");
 }
 

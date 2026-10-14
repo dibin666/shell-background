@@ -1,6 +1,10 @@
 /**
- * The same cleaning pi's own bash tool applies to what the model sees
- * (bash-executor.ts: `sanitizeBinaryOutput(stripAnsi(text)).replace(/\r/g, "")`).
+ * The cleaning pi's own bash tool applies to what the model sees
+ * (bash-executor.ts: `sanitizeBinaryOutput(stripAnsi(text)).replace(/\r/g, "")`),
+ * with one improvement: a carriage return is resolved, not deleted. pi drops
+ * the `\r` and keeps every progress frame's text, so a 2000-frame webpack bar
+ * arrives as one line holding all 2000 frames; here only the last frame of
+ * each line survives, which is what the terminal showed (see shrink.ts).
  *
  * This package re-registers `bash`, and a job's log is captured raw on disk on
  * purpose (the detached spawn writes straight to a file; no in-process pipes).
@@ -11,6 +15,8 @@
  * these helpers, so the regex (ansi-regex, MIT) and the code-point filter are
  * vendored here verbatim.
  */
+
+import { collapseCarriageReturns } from "./shrink.ts";
 
 // Valid string terminator sequences are BEL, ESC\, and 0x9c
 const ST = "(?:\\u0007|\\u001B\\u005C|\\u009C)";
@@ -44,7 +50,7 @@ export function sanitizeBinaryOutput(text: string): string {
     .join("");
 }
 
-/** Exactly what pi's bash gives the model: no ANSI, no control noise, no `\r`. */
+/** What pi's bash gives the model — no ANSI, no control noise — with `\r` redraws collapsed to their last frame. */
 export function sanitizeOutput(text: string): string {
-  return sanitizeBinaryOutput(stripAnsi(text)).replace(/\r/g, "");
+  return sanitizeBinaryOutput(collapseCarriageReturns(stripAnsi(text)));
 }

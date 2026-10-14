@@ -13,9 +13,10 @@ test("stripAnsi removes CSI colour codes and OSC hyperlinks, leaves plain text a
   assert.equal(stripAnsi("plain"), "plain");
 });
 
-test("sanitizeOutput matches pi's bash: no ANSI, no control chars, no carriage returns", () => {
+test("sanitizeOutput matches pi's bash (no ANSI, no control chars) but resolves a \r redraw to its last frame", () => {
   const raw = "\u001B[1mBuilding\u001B[0m 10%\r20%\r100%\r\n\u0007done\u0000\n";
-  assert.equal(sanitizeOutput(raw), "Building 10%20%100%\ndone\n");
+  // pi's own cleaning would hand the model "Building 10%20%100%": three frames glued together.
+  assert.equal(sanitizeOutput(raw), "100%\ndone\n");
   // tab and newline survive
   assert.equal(sanitizeOutput("a\tb\n"), "a\tb\n");
 });

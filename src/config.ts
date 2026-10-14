@@ -15,6 +15,12 @@ export interface ShellBgSettings {
   /** Bytes of the log tail shown in a status/collect result. */
   tailBytes: number;
   /**
+   * Lines a result may carry before it is shrunk: first and last lines kept,
+   * every error/warning line kept wherever it sits, the rest collapsed into
+   * counted markers. 0 disables shrinking (the byte tail is still the cap).
+   */
+  tailLines: number;
+  /**
    * How many jobs may be alive at once before a request to background one
    * more is refused and an auto-background transition is skipped. Every live
    * job is a whole process tree plus an open log; a session that keeps
@@ -28,6 +34,7 @@ export interface ShellBgSettings {
 export const DEFAULT_SETTINGS: ShellBgSettings = {
   autoBackgroundMs: 30_000,
   tailBytes: 64 * 1024,
+  tailLines: 200,
   maxBackground: 8,
 };
 
@@ -36,6 +43,7 @@ const LIMITS: Record<keyof ShellBgSettings, { min: number; max: number }> = {
   // does not make every command look long-running.
   autoBackgroundMs: { min: 0, max: 3_600_000 },
   tailBytes: { min: 1024, max: 4 * 1024 * 1024 },
+  tailLines: { min: 0, max: 5000 },
   maxBackground: { min: 1, max: 64 },
 };
 
