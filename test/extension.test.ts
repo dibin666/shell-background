@@ -21,6 +21,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import shellBackground from "../extensions/shell-background.ts";
 import { DELIVERY_TYPE } from "../src/pending.ts";
 
+// Isolate from the developer's own settings: the extension reads
+// <agentDir>/shell-background.json, which would otherwise leak into every test
+// (e.g. a global deliverResults:false silences the delivery assertions).
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "sbg-agentdir-"));
+
 type AnyTool = { name: string; execute: (...a: any[]) => Promise<any> };
 type AnyHandler = (event: any, ctx: any) => any;
 
@@ -139,6 +144,34 @@ test("polling a running job does not cancel its auto-delivery (bug #1)", async (
     assert.equal(h.sent.length, 1, "the finished job was auto-delivered exactly once");
     assert.equal(h.sent[0].customType, DELIVERY_TYPE);
     assert.equal(h.sent[0].details.id, jobId);
+  } finally {
+    await teardown(h, ctx);
+    await rmDir(cwd);
+    await rmDir(regDir);
+  }
+});
+
+test("deliverResults: false finishes the job without pushing a message into the conversation", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sbg-ext-nodeliver-"));
+  mkdirSync(join(cwd, ".pi"), { recursive: true });
+  writeFileSync(join(cwd, ".pi", "shell-background.json"), JSON.stringify({ deliverResults: false }));
+  const { id: sid, regDir } = uniqueSession();
+  const h = harness();
+  const ctx = makeCtx(cwd, false, sid);
+  try {
+    shellBackground(h.pi);
+    await h.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctx);
+    const bash = h.tools.get("bash")!;
+    const shellStatus = h.tools.get("shell_status")!;
+
+    const started = await bash.execute("t1", { command: "echo done", background: true }, undefined, undefined, ctx);
+    const jobId = started.details.id as string;
+
+    // The job still finishes and shell_status still collects it...
+    await waitFor(async () => (await shellStatus.execute("t2", { id: jobId })).details.status === "done", 6000);
+    // ...but nothing was pushed into the conversation.
+    await sleep(300);
+    assert.equal(h.sent.length, 0, "no delivery message when deliverResults is false");
   } finally {
     await teardown(h, ctx);
     await rmDir(cwd);
