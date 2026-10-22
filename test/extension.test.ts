@@ -490,3 +490,63 @@ test("pi 0.99: results carry structuredContent for scripts — exit_code once fi
     await rmDir(regDir);
   }
 });
+
+test("issue #2: a job collected with shell_status during the turn is not also delivered", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sbg-issue2-"));
+  const { id: sid, regDir } = uniqueSession();
+  const h = harness();
+  const ctx = makeCtx(cwd, false, sid);
+  try {
+    shellBackground(h.pi);
+    await h.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctx);
+    // A turn is running: delivery must be deferred to its end, not sent at exit.
+    await h.handlers.get("agent_start")!({ type: "agent_start" }, ctx);
+    const bash = h.tools.get("bash")!;
+    const shellStatus = h.tools.get("shell_status")!;
+
+    const started = await bash.execute("t1", { command: "echo done", background: true }, undefined, undefined, ctx);
+    const jobId = started.details.id as string;
+
+    // The model collects it this turn (each shell_status read on a finished job collects it).
+    await waitFor(async () => (await shellStatus.execute("t2", { id: jobId })).details.status === "done", 6000);
+    await sleep(300); // let any exit-time delivery attempt settle
+    assert.equal(h.sent.length, 0, "collected during the turn, so nothing queued");
+
+    // The turn ends: the drain must skip the already-collected job.
+    await h.handlers.get("agent_settled")!({ type: "agent_settled", aborted: false }, ctx);
+    await sleep(200);
+    assert.equal(h.sent.length, 0, "a job collected with shell_status is never delivered a second time");
+  } finally {
+    await teardown(h, ctx);
+    await rmDir(cwd);
+    await rmDir(regDir);
+  }
+});
+
+test("issue #2: a job nobody collects is delivered once at the turn boundary, not mid-turn", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sbg-issue2b-"));
+  const { id: sid, regDir } = uniqueSession();
+  const h = harness();
+  const ctx = makeCtx(cwd, false, sid);
+  try {
+    shellBackground(h.pi);
+    await h.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctx);
+    await h.handlers.get("agent_start")!({ type: "agent_start" }, ctx);
+    const started = await h.tools.get("bash")!.execute("t1", { command: "echo done", background: true }, undefined, undefined, ctx);
+    const jobId = started.details.id as string;
+
+    // The job finishes during the turn but is not collected: held, not sent yet.
+    await sleep(800);
+    assert.equal(h.sent.length, 0, "not delivered while the turn is still running");
+
+    // The turn ends: now it is delivered, exactly once.
+    await h.handlers.get("agent_settled")!({ type: "agent_settled", aborted: false }, ctx);
+    assert.equal(h.sent.length, 1, "delivered once when the turn ended");
+    assert.equal(h.sent[0].customType, DELIVERY_TYPE);
+    assert.equal(h.sent[0].details.id, jobId);
+  } finally {
+    await teardown(h, ctx);
+    await rmDir(cwd);
+    await rmDir(regDir);
+  }
+});

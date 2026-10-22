@@ -242,6 +242,47 @@ export default function shellBackground(pi: ExtensionAPI) {
   const waiters = new Map<string, number>();
   const awaited = (job: Job): boolean => (waiters.get(job.id) ?? 0) > 0;
 
+  // A finished job's result must reach the model exactly once, and NOT while
+  // the model may still collect it itself. The old code sent the follow-up the
+  // instant the process exited, so a `shell_status {id}` that collected the
+  // same job later in that turn got the result a second time (issue #2): the
+  // message was already queued when the job ended, and marking it collected
+  // afterwards was too late. So a finished job is held in `pending` and
+  // delivered only at a turn boundary (agent_settled) — or right away while
+  // idle, so a job finishing between turns still wakes the agent — and the
+  // drain skips any job a `shell_status` read marked `delivered` meanwhile.
+  // `waiters` still covers an ACTIVE wait, which returns and collects the
+  // result itself and so must never also be sent.
+  const pending = new Set<Job>();
+  let turnActive = false;
+
+  function enqueueDelivery(job: Job): void {
+    if (job.delivered) return;
+    pending.add(job);
+    maybeDrainDeliveries();
+  }
+
+  /** Drain now only while idle; during a turn the model may still collect a job, so wait for agent_settled. */
+  function maybeDrainDeliveries(): void {
+    if (!turnActive) drainDeliveries();
+  }
+
+  function drainDeliveries(): void {
+    for (const job of [...pending]) {
+      // Collected (by a shell_status read) since it was queued — never send it.
+      if (job.delivered) {
+        pending.delete(job);
+        continue;
+      }
+      // An active shell_status wait will return and collect this job itself.
+      if (awaited(job)) continue;
+      pending.delete(job);
+      job.delivered = true;
+      registry?.persist(job);
+      deliver(job);
+    }
+  }
+
   /** Deliver a finished background job into the conversation, once. */
   function scheduleDelivery(job: Job, exit: Promise<unknown>): void {
     exit
@@ -254,10 +295,7 @@ export default function shellBackground(pi: ExtensionAPI) {
           registry?.persist(job);
           return;
         }
-        if (job.delivered || awaited(job)) return;
-        job.delivered = true;
-        registry?.persist(job);
-        deliver(job);
+        enqueueDelivery(job);
       })
       .catch(() => {
         // A /reload can make captured handles throw; delivery is a convenience,
@@ -544,19 +582,17 @@ export default function shellBackground(pi: ExtensionAPI) {
       }
       if (sig?.aborted) {
         // The model never sees an aborted tool result. If the job finished
-        // while this wait held the delivery path back, deliver it now.
-        if (isFinished(job) && !job.delivered) {
-          job.delivered = true;
-          registry.persist(job);
-          deliver(job);
-        }
+        // while the wait held delivery back, hand it to the turn-boundary drain
+        // (it was not collected here) rather than dropping it.
+        if (isFinished(job) && !job.delivered) enqueueDelivery(job);
         return { content: [{ type: "text", text: `shell_status ${job.id}: wait aborted` }], details: { id: job.id }, isError: true };
       }
-      // Reading a finished job marks it collected so it will not also be
-      // delivered unasked. A still-running poll must never do this: setting
-      // delivered here would permanently cancel the promised auto-delivery.
+      // Reading a finished job marks it collected so the turn-boundary drain
+      // never also sends it (issue #2). A still-running poll must never do this:
+      // setting delivered here would permanently cancel the promised delivery.
       if (isFinished(job)) {
         job.delivered = true;
+        pending.delete(job);
         registry.persist(job);
       }
       return {
@@ -642,17 +678,26 @@ export default function shellBackground(pi: ExtensionAPI) {
           }
         }
         if (job.status === "running") anyRunning = true;
-        else if (!job.delivered && !awaited(job)) {
-          job.delivered = true;
-          registry.persist(job);
-          deliver(job);
-        }
+        else enqueueDelivery(job);
       }
       renderWidget(ctx);
       if (!anyRunning) clearInterval(timer);
     }, 1000);
     timer.unref?.();
   }
+
+  // Turn boundaries drive delivery: a finished job is pushed only when the
+  // current turn ends, so a job the model collects during the turn is never
+  // also delivered as a follow-up (issue #2).
+  pi.on("agent_start", async (_event, ctx) => {
+    turnActive = true;
+    lastUiCtx = ctx;
+  });
+  pi.on("agent_settled", async (_event, ctx) => {
+    turnActive = false;
+    lastUiCtx = ctx;
+    drainDeliveries();
+  });
 
   pi.on("session_start", async (_event, ctx) => {
     const warnings = loadSettings(ctx.cwd);
