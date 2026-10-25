@@ -172,7 +172,17 @@ export default function shellBackground(pi: ExtensionAPI) {
   }
 
   function renderWidget(ctx: UiContext | null = lastUiCtx): void {
-    if (!ctx || !ctx.hasUI || !registry) return;
+    // Called from timers too: a ctx made stale by a reload or session switch
+    // throws on access, and an exception in a timer would crash pi.
+    try {
+      renderWidgetWith(ctx);
+    } catch {
+      stopWidgetTimer();
+    }
+  }
+
+  function renderWidgetWith(ctx: UiContext | null): void {
+    if (handedOff || !ctx || !ctx.hasUI || !registry) return;
     lastUiCtx = ctx;
     const now = Date.now();
     const lines = buildWidgetLines(registry.all(), ctx.ui.theme as never, now);
@@ -657,7 +667,10 @@ export default function shellBackground(pi: ExtensionAPI) {
     if (adopted.length === 0) return;
     lastUiCtx = ctx;
     const timer = setInterval(() => {
-      if (!registry) {
+      // Handed off on /reload: the next instance adopts these jobs itself, and
+      // this instance's ctx is stale (touching it throws inside a timer, which
+      // takes pi down) — so this poller stops here.
+      if (!registry || handedOff) {
         clearInterval(timer);
         return;
       }

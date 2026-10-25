@@ -550,3 +550,44 @@ test("issue #2: a job nobody collects is delivered once at the turn boundary, no
     await rmDir(regDir);
   }
 });
+
+test("a second /reload while an adopted job runs does not touch the stale ctx (crash: 'ctx is stale')", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sbg-reload2-"));
+  const { id: sid, regDir } = uniqueSession();
+  const [a, b, c] = [harness(), harness(), harness()];
+  // pi's ctx throws on any access once its runtime was replaced; model that for B.
+  let bStale = false;
+  const ctxB = new Proxy(makeCtx(cwd, false, sid) as any, {
+    get(target, prop, recv) {
+      if (bStale) throw new Error("This extension ctx is stale after session replacement or reload.");
+      return Reflect.get(target, prop, recv);
+    },
+  }) as ExtensionContext;
+  const ctxA = makeCtx(cwd, false, sid);
+  const ctxC = makeCtx(cwd, false, sid);
+  const errors: unknown[] = [];
+  const onError = (e: unknown) => errors.push(e);
+  process.on("uncaughtException", onError);
+  try {
+    shellBackground(a.pi);
+    await a.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctxA);
+    await a.tools.get("bash")!.execute("t1", { command: "sleep 4", background: true }, undefined, undefined, ctxA);
+
+    await a.handlers.get("session_shutdown")!({ type: "session_shutdown", reason: "reload" }, ctxA);
+    shellBackground(b.pi);
+    await b.handlers.get("session_start")!({ type: "session_start", reason: "reload" }, ctxB); // B adopts, starts its poller
+
+    await b.handlers.get("session_shutdown")!({ type: "session_shutdown", reason: "reload" }, ctxB);
+    bStale = true;
+    shellBackground(c.pi);
+    await c.handlers.get("session_start")!({ type: "session_start", reason: "reload" }, ctxC);
+
+    await sleep(2500); // B's adoption poller ticks every second
+    assert.deepEqual(errors, [], "nothing threw from the old instance's timers");
+  } finally {
+    process.off("uncaughtException", onError);
+    await teardown(c, ctxC);
+    await rmDir(cwd);
+    await rmDir(regDir);
+  }
+});
