@@ -26,13 +26,21 @@
  * byte-identical shell behaviour. Zero runtime dependencies.
  */
 import {
+  copyToClipboard,
   createBashToolDefinition,
   getAgentDir,
   getShellConfig,
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import {
+  truncateToWidth,
+  type AutocompleteProvider,
+  type Component,
+  type TUI,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,7 +58,15 @@ import { formatResult, formatList, header } from "../src/format.ts";
 import { sanitizeOutput } from "../src/sanitize.ts";
 import { readFull } from "../src/tail.ts";
 import { STRUCTURED_OUTPUT_MAX_BYTES, bashOutputSchema, buildStructured, type BashStructured } from "../src/structured.ts";
-import { buildWidgetLines } from "../src/widget.ts";
+import { buildWidget } from "../src/widget.ts";
+import { JobBrowser, type BrowserOptions } from "../src/browser.ts";
+import {
+  SHELL_BG_USAGE,
+  completeShellBg,
+  parseShellBgArgs,
+  shellBgArgument,
+  wantsFollowUpCompletion,
+} from "../src/commands.ts";
 import { isFinished } from "../src/types.ts";
 import type { Job } from "../src/types.ts";
 
@@ -65,6 +81,29 @@ type ToolResult = {
 };
 
 const WIDGET = "shell-bg";
+const TUI_PROBE = "shell-bg-tui-probe";
+
+/**
+ * The aboveEditor box as a clickable component (fullscreen mode routes mouse
+ * events to components): a job row opens that job's output, any other row the
+ * job browser. A click only fires where the press was, so its row is the one.
+ */
+function clickableWidget(lines: string[], rowIds: Array<string | null>, onOpen: (jobId?: string) => void): Component {
+  return {
+    render: (width) => lines.map((l) => truncateToWidth(l, width)),
+    handleMouse: (e: TuiMouseEvent): TuiMouseEventResult | undefined => {
+      if (e.button !== "left" || e.y < 0 || e.y >= lines.length) return undefined;
+      if (e.type === "press") return { handled: true, render: false };
+      if (e.type !== "click") return undefined;
+      onOpen(rowIds[e.y] ?? undefined);
+      return { handled: true };
+    },
+    invalidate: () => {},
+  };
+}
+
+/** Terminal UI available (the overlay and the editor hooks are TUI-only; RPC gets text). */
+const isTui = (ctx: UiContext): boolean => ctx.hasUI && (ctx.mode === undefined || ctx.mode === "tui");
 
 export default function shellBackground(pi: ExtensionAPI) {
   let settings: ShellBgSettings = DEFAULT_SETTINGS;
@@ -185,19 +224,178 @@ export default function shellBackground(pi: ExtensionAPI) {
     if (handedOff || !ctx || !ctx.hasUI || !registry) return;
     lastUiCtx = ctx;
     const now = Date.now();
-    const lines = buildWidgetLines(registry.all(), ctx.ui.theme as never, now);
+    const { lines, rowIds } = buildWidget(registry.all(), ctx.ui.theme as never, now);
     if (lines.length === 0) {
       ctx.ui.setWidget(WIDGET, undefined);
       stopWidgetTimer();
       return;
     }
-    ctx.ui.setWidget(WIDGET, (_tui: unknown) => new Text(lines.join("\n"), 0, 0), { placement: "aboveEditor" });
+    ctx.ui.setWidget(
+      WIDGET,
+      (tui: unknown) => {
+        captureTui(tui);
+        return clickableWidget(lines, rowIds, (jobId) => void openBrowser(lastUiCtx, { jobId }));
+      },
+      { placement: "aboveEditor" },
+    );
     // Keep the box live between events: tick the elapsed clock while jobs run and
     // clear a finished job once it falls out of its 15s window, even if nothing
     // else fires a render. Unref'd, so a lingering box never holds the host open.
     if (!widgetTimer) {
       widgetTimer = setInterval(() => renderWidget(), 1000);
       widgetTimer.unref?.();
+    }
+  }
+
+  // ── job browser ────────────────────────────────────────────────────
+
+  let browserOpen = false;
+  const BROWSER_HISTORY_BYTES = 2 * 1024 * 1024;
+
+  /**
+   * Copy browser-selected text the way pi copies a fullscreen selection: its
+   * renderer's clipboard path (native clipboard, then OSC 52) with its
+   * "Copied!" flash. Without that renderer, pi's exported clipboard helper.
+   */
+  function copyText(tui: TUI, ctx: UiContext, text: string): void {
+    const viewport = tui as unknown as { copyTextToClipboard?: (t: string) => Promise<boolean> };
+    const done =
+      typeof viewport.copyTextToClipboard === "function"
+        ? viewport.copyTextToClipboard(text)
+        : copyToClipboard(text).then(
+            () => ctx.ui.notify("Copied!", "info"),
+            (err: unknown) => ctx.ui.notify(`Copy failed: ${err instanceof Error ? err.message : String(err)}`, "error"),
+          );
+    done.catch(() => {}); // e.g. a ctx gone stale while copying — never an unhandled rejection
+  }
+
+  // ── /shell-bg autocomplete ─────────────────────────────────────────────
+
+  // The TUI, kept from any factory pi hands it to, so an accepted completion
+  // can ask the editor to open the next list.
+  type FocusTracker = { getFocusedComponent(): unknown };
+  let tuiRef: FocusTracker | null = null;
+  function captureTui(tui: unknown): void {
+    if (tui && typeof (tui as FocusTracker).getFocusedComponent === "function") tuiRef = tui as FocusTracker;
+  }
+
+  /**
+   * pi's editor closes the completion list when an item is accepted and only
+   * reopens it on the next letter typed — so after `/shell-bg kill ` the jobs
+   * did not show until a key was pressed. Reopen it once the editor is done
+   * with the keypress. pi has no public call for this; the editor's own
+   * trigger is used when present, and without it Tab still opens the list.
+   */
+  function reopenCompletions(): void {
+    setTimeout(() => {
+      type Editor = { tryTriggerAutocomplete?(): void; isShowingAutocomplete?(): boolean; getText?(): string };
+      const editor = tuiRef?.getFocusedComponent() as Editor | null | undefined;
+      if (!editor?.tryTriggerAutocomplete || editor.isShowingAutocomplete?.()) return;
+      if (wantsFollowUpCompletion(editor.getText?.() ?? "")) editor.tryTriggerAutocomplete();
+    }, 0);
+  }
+
+  /**
+   * Wrap pi's autocomplete so `/shell-bg` arguments are always ours: the base
+   * provider only consults a command's completions on typing, and a Tab after
+   * `/shell-bg kill ` fell through to file paths. Everything else is passed on.
+   */
+  function wrapAutocomplete(current: AutocompleteProvider): AutocompleteProvider {
+    // A slash command lives on the editor's first line.
+    const argAt = (lines: string[], line: number, col: number) => (line === 0 ? shellBgArgument((lines[0] ?? "").slice(0, col)) : null);
+    const ours: Partial<AutocompleteProvider> = {
+      async getSuggestions(lines, line, col, options) {
+        const arg = argAt(lines, line, col);
+        if (arg === null) return current.getSuggestions(lines, line, col, options);
+        const items = completeShellBg(arg, registry?.all() ?? []);
+        return items ? { items, prefix: arg } : null;
+      },
+      applyCompletion(lines, line, col, item, prefix) {
+        const result = current.applyCompletion(lines, line, col, item, prefix);
+        const after = result.cursorLine === 0 ? (result.lines[0] ?? "").slice(0, result.cursorCol) : "";
+        if (wantsFollowUpCompletion(after)) reopenCompletions();
+        return result;
+      },
+      shouldTriggerFileCompletion(lines, line, col) {
+        if (argAt(lines, line, col) !== null) return true;
+        return current.shouldTriggerFileCompletion?.(lines, line, col) ?? true;
+      },
+    };
+    return new Proxy(current, {
+      get(target, prop) {
+        if (Object.prototype.hasOwnProperty.call(ours, prop)) return (ours as Record<PropertyKey, unknown>)[prop];
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  }
+
+  /** Stop a running job from the UI (command, browser), saying so. */
+  function killFromUi(job: Job, ctx: UiContext): void {
+    if (job.status !== "running") {
+      ctx.ui.notify(`${job.id} already ${job.status}.`, "warning");
+      return;
+    }
+    job.killedByUs = true;
+    killTree(job.pid);
+    ctx.ui.notify(`Killing ${job.id}.`, "info");
+  }
+
+  /**
+   * What the browser shows for a job: the cleaned log history — far more than
+   * the model-facing tail, so scrolling up reaches old output — with a note
+   * when even that is not the whole log.
+   */
+  function browserOutput(job: Job): string {
+    const tail = readTail(job.logPath, Math.max(settings.tailBytes, BROWSER_HISTORY_BYTES));
+    if (tail.missing) return `(log unavailable: ${job.logPath} could not be read)`;
+    const text = sanitizeOutput(tail.text);
+    if (!tail.truncated) return text;
+    const kb = Math.round(Buffer.byteLength(tail.text, "utf8") / 1024);
+    return `… the last ${kb}KB of a ${Math.round(tail.bytes / 1024)}KB log — full log: ${job.logPath}\n${text}`;
+  }
+
+  /**
+   * Open the centered job browser overlay (TUI only). Width is a share of the
+   * terminal picked from its size at open — so a resize keeps the proportion —
+   * and the component sizes its height from the terminal rows.
+   */
+  async function openBrowser(ctx: UiContext | null, options: BrowserOptions = {}): Promise<void> {
+    if (!ctx || !isTui(ctx) || !registry || browserOpen) return;
+    browserOpen = true;
+    try {
+      let columns = 100;
+      await ctx.ui.custom<void>(
+        (tui, theme, keybindings, done) => {
+          captureTui(tui);
+          columns = tui.terminal?.columns ?? columns;
+          // pi copies a selection on release, or — with fullscreenCopyOnSelect off — with its app.message.copy key.
+          const copyAction = "app.message.copy" as never;
+          const viewport = tui as unknown as { getCopyOnSelect?: () => boolean };
+          return new JobBrowser(theme as never, {
+            jobs: () => registry?.all() ?? [],
+            output: browserOutput,
+            kill: (job) => killFromUi(job, ctx),
+            rows: () => tui.terminal?.rows ?? 30,
+            requestRender: () => tui.requestRender(),
+            close: () => done(undefined),
+            copy: (text) => copyText(tui, ctx, text),
+            copyOnSelect: () => viewport.getCopyOnSelect?.() ?? true,
+            isCopyKey: (data) => keybindings.matches?.(data, copyAction) ?? false,
+            copyKeyLabel: String(keybindings.getKeys?.(copyAction)?.[0] ?? "ctrl+x"),
+          }, options);
+        },
+        {
+          overlay: true,
+          overlayOptions: () => {
+            // ~160 columns where there is room (at least 70% of the width), nearly all of it where there is not.
+            const pct = Math.max(70, Math.min(96, Math.round((160 / Math.max(1, columns)) * 100)));
+            return { anchor: "center", width: `${pct}%`, minWidth: Math.min(60, columns), maxHeight: "80%", margin: 1 };
+          },
+        },
+      );
+    } finally {
+      browserOpen = false;
     }
   }
 
@@ -633,22 +831,49 @@ export default function shellBackground(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("shell-bg", {
-    description: "Background shell jobs: /shell-bg [kill <id>]",
+    description: "Background shell jobs: /shell-bg [tui | status [id] | kill [id] | list]",
+    // `kill` completes only running jobs; `status` every job of this session.
+    getArgumentCompletions: (prefix: string) => completeShellBg(prefix, registry?.all() ?? []),
     handler: async (args, ctx: UiContext) => {
       if (!ctx.hasUI || !registry) return;
-      const [verb, id] = (args ?? "").trim().split(/\s+/);
-      if (verb === "kill" && id) {
-        const job = registry.get(id);
-        if (job && job.status === "running") {
-          job.killedByUs = true;
-          killTree(job.pid);
-          ctx.ui.notify(`Killing ${job.id}.`, "info");
-        } else {
-          ctx.ui.notify(job ? `${id} already ${job.status}.` : `No job "${id}".`, "warning");
+      lastUiCtx = ctx;
+      const tui = isTui(ctx); // an RPC client gets the text form instead of the overlay
+      const action = parseShellBgArgs(args);
+      switch (action.kind) {
+        case "none":
+          // A bare /shell-bg opens nothing; the completion list shows the subcommands.
+          return;
+        case "list":
+          ctx.ui.notify(formatList(registry.all()), "info");
+          return;
+        case "browse":
+          if (tui) await openBrowser(ctx);
+          else ctx.ui.notify(formatList(registry.all()), "info");
+          return;
+        case "status": {
+          const job = registry.get(action.id);
+          if (!job) {
+            ctx.ui.notify(`No job "${action.id}". Known: ${registry.all().map((j) => j.id).join(", ") || "(none)"}`, "warning");
+            return;
+          }
+          if (tui) await openBrowser(ctx, { jobId: job.id });
+          else ctx.ui.notify(formatResult(job, settings.tailBytes, settings.tailLines), "info");
+          return;
         }
-        return;
+        case "pick-kill":
+          if (registry.running().length === 0) ctx.ui.notify("No running background jobs.", "info");
+          else if (tui) await openBrowser(ctx, { mode: "kill" });
+          else ctx.ui.notify(`${SHELL_BG_USAGE} — running: ${registry.running().map((j) => j.id).join(", ")}`, "info");
+          return;
+        case "kill": {
+          const job = registry.get(action.id);
+          if (!job) ctx.ui.notify(`No job "${action.id}".`, "warning");
+          else killFromUi(job, ctx);
+          return;
+        }
+        default:
+          ctx.ui.notify(`Unknown subcommand "${action.verb}". ${SHELL_BG_USAGE}`, "warning");
       }
-      ctx.ui.notify(formatList(registry.all()), "info");
     },
   });
 
@@ -719,6 +944,15 @@ export default function shellBackground(pi: ExtensionAPI) {
     registry = new JobRegistry(join(ROOT, key));
     registry.load();
     registerBash(ctx.cwd, ctx.hasUI);
+    if (isTui(ctx)) {
+      // pi drops wrappers whenever it rebuilds the session's UI, and session_start follows, so add it here.
+      ctx.ui.addAutocompleteProvider?.(wrapAutocomplete);
+      // Borrow the TUI from a widget factory (pi calls it at once), then drop the empty widget.
+      ctx.ui.setWidget(TUI_PROBE, (tui: unknown) => (captureTui(tui), { render: () => [], invalidate: () => {} }), {
+        placement: "belowEditor",
+      });
+      ctx.ui.setWidget(TUI_PROBE, undefined);
+    }
     renderWidget(ctx);
     adoptRunning(ctx);
     if (warnings.length > 0 && ctx.hasUI) ctx.ui.notify(`shell-background settings: ${warnings.join("; ")}`, "warning");

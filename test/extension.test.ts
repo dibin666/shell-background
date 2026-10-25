@@ -551,6 +551,183 @@ test("issue #2: a job nobody collects is delivered once at the turn boundary, no
   }
 });
 
+test("/shell-bg: completions offer only running jobs for kill, and the widget and command open the browser", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sbg-ext-cmd-"));
+  const { id: sid, regDir } = uniqueSession();
+  const h = harness();
+  const commands = new Map<string, any>();
+  (h.pi as any).registerCommand = (name: string, opts: unknown) => commands.set(name, opts);
+  let widget: any;
+  const notes: string[] = [];
+  const opened: any[] = [];
+  const base = makeCtx(cwd, true, sid) as any;
+  const ctx = {
+    ...base,
+    mode: "tui",
+    ui: {
+      ...base.ui,
+      theme: { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => t, bold: (t: string) => t },
+      setWidget: (k: string, factory: any) => {
+        if (k === "shell-bg") widget = factory?.({});
+      },
+      notify: (m: string) => notes.push(m),
+      // Build the component the way pi does and record the overlay options; close at once.
+      custom: async (factory: any, options: any) => {
+        let done = false;
+        const tui = { terminal: { columns: 200, rows: 50 }, requestRender: () => {} };
+        const c = factory(tui, ctx.ui.theme, {}, () => (done = true));
+        opened.push({ state: c.state(), options: options.overlayOptions(), lines: c.render(100) });
+        c.dispose();
+        assert.equal(done, false);
+      },
+    },
+  } as unknown as ExtensionContext;
+  try {
+    shellBackground(h.pi);
+    await h.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctx);
+    const bash = h.tools.get("bash")!;
+    const quick = await bash.execute("t1", { command: "echo hi", background: true }, undefined, undefined, ctx);
+    const slow = await bash.execute("t2", { command: "sleep 30", background: true }, undefined, undefined, ctx);
+    const quickId = quick.details.id as string;
+    const slowId = slow.details.id as string;
+    await waitFor(() => h.tools.get("shell_status")!.execute("p", { id: quickId }).then((r: any) => r.details.status === "done"), 5000);
+
+    const cmd = commands.get("shell-bg");
+    assert.ok(cmd, "the command is registered");
+    assert.deepEqual((await cmd.getArgumentCompletions("")).map((i: any) => i.label), ["tui", "status", "kill", "list"]);
+    assert.deepEqual((await cmd.getArgumentCompletions("kill ")).map((i: any) => i.value), [`kill ${slowId}`]);
+    assert.deepEqual(
+      (await cmd.getArgumentCompletions("status ")).map((i: any) => i.value).sort(),
+      [`status ${quickId}`, `status ${slowId}`].sort(),
+    );
+
+    // /shell-bg status <id> opens that job's detail, centered and sized to the terminal.
+    await cmd.handler(`status ${quickId}`, ctx);
+    assert.equal(opened.length, 1);
+    assert.deepEqual(opened[0].state, { view: "detail", jobId: quickId, query: "" });
+    assert.equal(opened[0].options.anchor, "center");
+    assert.equal(opened[0].options.width, "80%", "160 of 200 columns");
+    assert.ok(opened[0].lines.some((l: string) => l.includes("hi")), "the detail shows the job's output");
+
+    // /shell-bg tui and /shell-bg status open the list; a bare /shell-bg opens nothing.
+    const notesBefore = notes.length;
+    await cmd.handler("", ctx);
+    assert.equal(opened.length, 1, "bare /shell-bg opens no window");
+    assert.equal(notes.length, notesBefore, "and says nothing");
+    await cmd.handler("tui", ctx);
+    await cmd.handler("status", ctx);
+    assert.deepEqual(opened.slice(1).map((o) => o.state.view), ["list", "list"]);
+
+    // An unknown id is a warning, not an empty window.
+    await cmd.handler("status bg-999", ctx);
+    assert.equal(opened.length, 3);
+    assert.match(notes.at(-1)!, /No job "bg-999"/);
+
+    // Clicking a job row in the widget opens that job.
+    assert.ok(widget, "the widget is a component");
+    const rows: string[] = widget.render(80);
+    const y = rows.findIndex((l) => l.includes(slowId));
+    assert.ok(y > 0, "the running job has a widget row");
+    const ev = (type: string) => ({ type, button: "left", x: 3, y, screenX: 3, screenY: y, width: 80, height: rows.length, shift: false, alt: false, ctrl: false });
+    assert.deepEqual(widget.handleMouse(ev("press")), { handled: true, render: false });
+    widget.handleMouse(ev("click"));
+    await waitFor(() => opened.length === 4, 2000);
+    assert.deepEqual(opened[3].state, { view: "detail", jobId: slowId, query: "" });
+
+    // kill <id> stops it.
+    await cmd.handler(`kill ${slowId}`, ctx);
+    assert.match(notes.at(-1)!, new RegExp(`Killing ${slowId}`));
+  } finally {
+    await teardown(h, ctx);
+    await rmDir(cwd);
+    await rmDir(regDir);
+  }
+});
+
+test("/shell-bg autocomplete: arguments are served on Tab too, and accepting a subcommand reopens the list", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sbg-ext-ac-"));
+  const { id: sid, regDir } = uniqueSession();
+  const h = harness();
+  let wrapperFactory: any;
+  let triggered = 0;
+  let editorText = "";
+  const editor = {
+    tryTriggerAutocomplete: () => triggered++,
+    isShowingAutocomplete: () => false,
+    getText: () => editorText,
+  };
+  const fakeTui = { getFocusedComponent: () => editor, terminal: { columns: 120, rows: 40 }, requestRender: () => {} };
+  const base = makeCtx(cwd, true, sid) as any;
+  const ctx = {
+    ...base,
+    mode: "tui",
+    ui: {
+      ...base.ui,
+      setWidget: (_k: string, factory: any) => factory?.(fakeTui),
+      addAutocompleteProvider: (f: any) => (wrapperFactory = f),
+    },
+  } as unknown as ExtensionContext;
+  try {
+    shellBackground(h.pi);
+    await h.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctx);
+    assert.ok(wrapperFactory, "an autocomplete wrapper is registered");
+
+    const bash = h.tools.get("bash")!;
+    const slow = await bash.execute("t1", { command: "sleep 30", background: true }, undefined, undefined, ctx);
+    const slowId = slow.details.id as string;
+
+    // The base provider: file paths for anything forced, and a plain line edit to apply.
+    const baseCalls: string[] = [];
+    const baseProvider = {
+      triggerCharacters: ["@"],
+      getSuggestions: async (lines: string[]) => {
+        baseCalls.push(lines[0]!);
+        return { items: [{ value: "some/file", label: "file" }], prefix: "" };
+      },
+      applyCompletion: (lines: string[], line: number, col: number, item: any, prefix: string) => {
+        const cur = lines[line]!;
+        const next = cur.slice(0, col - prefix.length) + item.value + cur.slice(col);
+        return { lines: [next], cursorLine: 0, cursorCol: col - prefix.length + item.value.length };
+      },
+      shouldTriggerFileCompletion: () => false,
+    };
+    const p = wrapperFactory(baseProvider);
+    const signal = new AbortController().signal;
+    assert.deepEqual(p.triggerCharacters, ["@"], "other properties pass through");
+
+    // A forced (Tab) request after "/shell-bg kill " gets the running jobs, not file paths.
+    const line = "/shell-bg kill ";
+    assert.equal(p.shouldTriggerFileCompletion([line], 0, line.length), true);
+    const s = await p.getSuggestions([line], 0, line.length, { signal, force: true });
+    assert.deepEqual(s.items.map((i: any) => i.value), [`kill ${slowId}`]);
+    assert.equal(s.prefix, "kill ");
+    assert.deepEqual(baseCalls, [], "the base provider is not asked about /shell-bg arguments");
+
+    // Anything else goes to the base provider.
+    await p.getSuggestions(["hello @src"], 0, 10, { signal });
+    assert.deepEqual(baseCalls, ["hello @src"]);
+
+    // Accepting the "kill " subcommand reopens the list once the editor is done with the key.
+    const typed = "/shell-bg k";
+    const verb = (await p.getSuggestions([typed], 0, typed.length, { signal })).items[0];
+    const applied = p.applyCompletion([typed], 0, typed.length, verb, "k");
+    assert.equal(applied.lines[0], "/shell-bg kill ");
+    editorText = applied.lines[0];
+    await sleep(20);
+    assert.equal(triggered, 1, "the editor's completion list was reopened");
+
+    // Accepting a job id does not reopen anything.
+    p.applyCompletion(["/shell-bg kill b"], 0, 16, { value: `kill ${slowId}`, label: slowId }, "kill b");
+    editorText = `/shell-bg kill ${slowId}`;
+    await sleep(20);
+    assert.equal(triggered, 1);
+  } finally {
+    await teardown(h, ctx);
+    await rmDir(cwd);
+    await rmDir(regDir);
+  }
+});
+
 test("a second /reload while an adopted job runs does not touch the stale ctx (crash: 'ctx is stale')", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "sbg-reload2-"));
   const { id: sid, regDir } = uniqueSession();

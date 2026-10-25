@@ -30,7 +30,32 @@ shell_status                             # list every background command this se
 shell_kill { id: "bg-2" }                # stop it and its whole process tree
 ```
 
-`/shell-bg` lists the jobs; `/shell-bg kill bg-2` stops one.
+### `/shell-bg`
+
+| Command | What it does |
+|---|---|
+| `/shell-bg` or `/shell-bg status` | Opens the job browser: a centered overlay listing every job with its status, searchable by id or command. |
+| `/shell-bg status bg-2` | Opens that job's output directly. |
+| `/shell-bg kill` | Picks a running job to stop. |
+| `/shell-bg kill bg-2` | Stops that job and its whole process tree. |
+| `/shell-bg list` | Shows the job list as a notification. |
+
+The arguments autocomplete. Subcommands come first, then job ids: `kill` offers only jobs that are still running, and `status` offers every job, with its status icon and command. Accepting `kill` or `status` from the list opens the job list straight away, and Tab after them lists jobs, not file paths.
+
+In the browser, each job's row is colored by its status, and a legend under the list names the colors: running, done, failed, killed, orphaned (its session ended). Each row ends with how long the job ran. ↑↓ moves the selection, typing filters, Enter opens a job, and Esc closes.
+
+A job's view shows its log history, up to the last 2 MiB, which is more than the tail the model sees. ↑↓, PgUp/PgDn and Home/End scroll it, and it follows new lines while you are at the bottom. ← or Backspace goes back to the list, and `k` kills a running job.
+
+The overlay's width is a share of the terminal, and its height fits the content, up to about 70% of the screen.
+
+In pi's fullscreen mode (the default) the mouse works too:
+
+- The wheel scrolls.
+- A click opens a job or presses `[‹ back]` / `[✗ kill]`.
+- A click on a job row in the widget above the editor opens that job's output.
+- Dragging over the log selects text. Double-click selects a word, triple-click a row.
+
+A selection is copied the way pi copies one, through pi's clipboard path with its "Copied!" flash. It follows pi's `fullscreenCopyOnSelect` setting: on release, or with pi's copy key (`app.message.copy`, `ctrl+x` by default) when that setting is off. The overlay draws its own selection, so a selection spanning rows copies only the log text, without the window's border or the screen behind it. pi passes mouse events only in fullscreen mode, so every action except selecting text also has a key.
 
 ## Delivery, and the headless caveat
 
