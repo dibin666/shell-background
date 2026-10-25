@@ -361,3 +361,30 @@ test("a growing log is appended to the wrapped view, and the view keeps followin
     b.dispose();
   }
 });
+
+test("a job that finishes while its detail is open shows its final output on the next refresh", () => {
+  const j = job("bg-1", "running", "build", Date.now() - 5000);
+  let text = "step 1\nstep 2";
+  const s = setup({ jobs: [j], output: () => text });
+  const b = new JobBrowser(theme, s.src, { jobId: "bg-1" });
+  try {
+    assert.ok(b.render(80).some((l) => l.includes("step 2")));
+    // The job prints its last lines and exits between two refreshes.
+    text += "\nstep 3\nDONE";
+    j.status = "done";
+    j.exitCode = 0;
+    j.endedAt = Date.now();
+    (b as any).outputCache.stale = true; // the 1s refresh tick
+    let lines = b.render(80);
+    assert.ok(lines.some((l) => l.includes("DONE")), "the final output is read once the job has ended");
+    assert.match(lines[0]!, /✓ bg-1 · done/);
+    // Read after the end, the log is final: later ticks do not read it again.
+    let reads = 0;
+    s.src.output = () => (reads++, text);
+    (b as any).outputCache.stale = true;
+    lines = b.render(80);
+    assert.equal(reads, 0);
+  } finally {
+    b.dispose();
+  }
+});

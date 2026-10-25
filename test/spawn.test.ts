@@ -72,3 +72,21 @@ test("killTree is a safe no-op on invalid pids", () => {
     killTree(-5);
   });
 });
+
+test("the log is complete the moment exit resolves, even after a burst of output", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sbg-flush-"));
+  try {
+    const { shell: sh, args } = shell();
+    // Before the fix, about 1 run in 5 read here lost its tail: exit resolved
+    // while the last writes were still queued in the log's write stream.
+    for (let i = 0; i < 20; i++) {
+      const log = join(dir, `l${i}.log`);
+      const s = spawnToFile(sh, args, "seq 1 50000; echo END-MARKER", dir, process.env, log);
+      await s.exit; // no sleep: whatever reads the log at settle time must see it all
+      const text = readTail(log, 1024 * 1024).text;
+      assert.ok(text.trimEnd().endsWith("END-MARKER"), `run ${i}: log ends with ${JSON.stringify(text.slice(-20))}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

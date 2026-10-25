@@ -30,6 +30,8 @@ export interface Spawned {
 }
 
 const DRAIN_GRACE_MS = 150;
+/** Upper bound on waiting for the log to reach the disk, should the stream never report back. */
+const FLUSH_TIMEOUT_MS = 2000;
 
 export function spawnToFile(
   shell: string,
@@ -84,12 +86,25 @@ export function spawnToFile(
     const finish = () => {
       if (settled || !info) return;
       settled = true;
+      const exitInfo = info;
+      // Resolve only once the log is on disk. out.write() is asynchronous, so a
+      // burst of output just before the exit can still be queued here, and a
+      // result read the moment the job settles would miss its tail (measured: 4
+      // of 20 `seq 1 50000; echo END` runs lost the end). end()'s callback fires
+      // on 'finish', after every queued write; an error or a stream that never
+      // answers must not hang the job, hence the listener and the timeout.
+      const done = () => {
+        clearTimeout(timer);
+        resolve(exitInfo);
+      };
+      const timer = setTimeout(done, FLUSH_TIMEOUT_MS);
+      timer.unref?.();
+      out.once("error", done);
       try {
-        out.end();
+        out.end(done);
       } catch {
-        // already closed
+        done(); // already closed
       }
-      resolve(info);
     };
     const maybeFinish = () => {
       if (info && stdoutEnded && stderrEnded) finish();
