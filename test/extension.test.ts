@@ -921,3 +921,33 @@ test("issue #3: a manual kill during a turn is held to the turn's end, then queu
     await rmDir(regDir);
   }
 });
+
+test("a job adopted after /reload and killed there reads as killed, even when it exits with a plain code (as on Windows)", { skip: process.platform === "win32" }, async () => {
+  // On Windows taskkill leaves exit code 1 and no signal. The old instance,
+  // which settles the job, never saw the kill and recorded "failed". This shell
+  // exits the same way on SIGTERM, so POSIX runs the same path.
+  const cwd = mkdtempSync(join(tmpdir(), "sbg-kill3-code-"));
+  const { id: sid, regDir } = uniqueSession();
+  const a = killHarness(cwd, sid);
+  const b = killHarness(cwd, sid);
+  try {
+    shellBackground(a.h.pi);
+    await a.h.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, a.ctx);
+    const r = await a.h.tools
+      .get("bash")!
+      .execute("t1", { command: "trap 'exit 1' TERM; echo ready; while :; do sleep 0.1; done", background: true }, undefined, undefined, a.ctx);
+    const id = r.details.id as string;
+    await waitFor(async () => /ready/.test(String((await a.h.tools.get("shell_status")!.execute("p", { id })).content[0].text)), 5000);
+    await a.h.handlers.get("session_shutdown")!({ type: "session_shutdown", reason: "reload" }, a.ctx);
+    shellBackground(b.h.pi);
+    await b.h.handlers.get("session_start")!({ type: "session_start", reason: "reload" }, b.ctx);
+
+    const k = await b.h.tools.get("shell_kill")!.execute("t2", { id });
+    assert.equal(k.details.status, "killed", "not failed: the kill came from this instance");
+    assert.equal(k.details.exitCode, 1);
+  } finally {
+    await teardown(b.h, b.ctx);
+    await rmDir(cwd);
+    await rmDir(regDir);
+  }
+});

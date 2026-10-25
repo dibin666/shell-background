@@ -941,7 +941,11 @@ export default function shellBackground(pi: ExtensionAPI) {
         if (job.status === "running") {
           const disk = registry.readSidecar(job.id);
           if (disk && disk.status !== "running") {
-            job.status = disk.status;
+            // The old instance settled it without knowing this one killed it.
+            // On POSIX the signal still reads as killed; on Windows taskkill
+            // leaves only exit code 1, which it records as failed. A kill sent
+            // from here is a kill, as settle() decides for its own jobs.
+            job.status = job.killedByUs && disk.status !== "orphaned" ? "killed" : disk.status;
             job.exitCode = disk.exitCode;
             job.signal = disk.signal;
             job.endedAt = disk.endedAt ?? Date.now();
