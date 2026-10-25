@@ -44,16 +44,18 @@ A bare `/shell-bg` opens nothing; while you type it, the completion list shows t
 
 The arguments autocomplete. Subcommands come first (`tui`, `status`, `kill`, `list`), then job ids: `kill` offers only jobs that are still running, and `status` offers every job, with its status icon and command. Accepting `kill` or `status` from the list opens the job list straight away, and Tab after them lists jobs, not file paths.
 
-In the browser, each job's row is colored by its status, and a legend under the list names the colors: running, done, failed, killed, orphaned (its session ended). Each row ends with how long the job ran. ↑↓ moves the selection, typing filters, Enter opens a job, and Esc closes.
+In the browser, each job's row is colored by its status, and a legend under the list names the colors: running, done, failed, killed, orphaned (its session ended). Each row ends with how long the job ran. ↑↓ moves the selection, typing filters, Enter opens a job, and Esc or the ✕ in the top-right corner closes.
 
 A job's view shows its log history, up to the last 2 MiB, which is more than the tail the model sees. ↑↓, PgUp/PgDn and Home/End scroll it, and it follows new lines while you are at the bottom. ← or Backspace goes back to the list, and `k` kills a running job.
+
+A kill from the overlay always asks first. This covers `k`, `[✗ kill]`, and Enter or a click in `/shell-bg kill`'s picker. The bottom row turns into `[✗ Kill bg-2] [Cancel]` with the job's command. Enter, `y` or the Kill button stops the job. Esc, `n` or Cancel keeps it, and Esc here does not close the overlay. A `/shell-bg kill bg-2` typed with its id is already deliberate, so it stops the job without asking.
 
 The overlay's size follows the terminal. Its width is a share of the terminal's width. The list is as tall as its jobs, up to about 70% of the terminal rows. A job's view is always exactly that 70%, however short or long its log, so the window does not jump while output streams in. A resize changes both.
 
 In pi's fullscreen mode (the default) the mouse works too:
 
 - The wheel scrolls.
-- A click opens a job or presses `[‹ back]` / `[✗ kill]`.
+- A click opens a job or presses `[‹ back]` / `[✗ kill]`, and a click on the ✕ closes the overlay.
 - A click on a job row in the widget above the editor opens that job's output.
 - Dragging over the log selects text. Double-click selects a word, triple-click a row.
 

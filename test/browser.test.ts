@@ -199,13 +199,18 @@ test("a long log scrolls, follows the tail, and the detail height is fixed by th
   }
 });
 
-test("kill mode lists only running jobs and enter kills the chosen one", () => {
+test("kill mode lists only running jobs, and enter asks before it kills the chosen one", () => {
   const s = setup();
   const b = new JobBrowser(theme, s.src, { mode: "kill" });
   try {
-    const lines = b.render(80);
+    let lines = b.render(80);
     assert.ok(lines.some((l) => l.includes("bg-2")));
     assert.ok(!lines.some((l) => l.includes("bg-1 ") || l.includes("bg-3 ")), "finished jobs are not offered");
+    b.handleInput(KEY.enter);
+    assert.deepEqual(s.killed, [], "the first enter only asks");
+    assert.equal(b.pendingKill(), "bg-2");
+    lines = b.render(80);
+    assert.ok(lines.some((l) => l.includes("[✗ Kill bg-2] [Cancel]") && l.includes("Stop bg-2 (npm run dev)")));
     b.handleInput(KEY.enter);
     assert.deepEqual(s.killed, ["bg-2"]);
     assert.equal(s.closed(), 1);
@@ -214,7 +219,7 @@ test("kill mode lists only running jobs and enter kills the chosen one", () => {
   }
 });
 
-test("k kills a running job from its detail, and does nothing for a finished one", () => {
+test("k kills a running job from its detail after a yes, and does nothing for a finished one", () => {
   const s = setup();
   const b = new JobBrowser(theme, s.src, { jobId: "bg-1" });
   try {
@@ -226,7 +231,11 @@ test("k kills a running job from its detail, and does nothing for a finished one
     b.handleInput(KEY.enter);
     assert.equal(b.state().jobId, "bg-2");
     b.handleInput("k");
+    assert.deepEqual(s.killed, [], "k only asks");
+    b.handleInput("y");
     assert.deepEqual(s.killed, ["bg-2"]);
+    assert.equal(b.state().view, "detail", "the detail stays open after the kill");
+    assert.equal(s.closed(), 0);
   } finally {
     b.dispose();
   }
@@ -386,5 +395,87 @@ test("a job that finishes while its detail is open shows its final output on the
     assert.equal(reads, 0);
   } finally {
     b.dispose();
+  }
+});
+
+test("a kill waiting for its yes: esc and n cancel without closing, and clicks only reach the buttons", () => {
+  const s = setup();
+  const b = new JobBrowser(theme, s.src, { jobId: "bg-2" });
+  try {
+    b.render(80);
+    b.handleInput("k");
+    b.handleInput(KEY.esc);
+    assert.equal(b.pendingKill(), null, "esc cancels the kill");
+    assert.equal(s.closed(), 0, "and does not close the overlay");
+    b.handleInput("k");
+    b.handleInput("n");
+    assert.equal(b.pendingKill(), null);
+    b.handleInput("x"); // any other key while nothing is pending is just a key
+    assert.deepEqual(s.killed, []);
+
+    // The [✗ kill] button asks too; [Cancel] cancels, a click elsewhere does nothing.
+    let lines = b.render(80);
+    let y = rowOf(lines, "[✗ kill]");
+    let x = lines[y]!.indexOf("[✗ kill]");
+    b.handleMouse(mouse("press", x + 1, y));
+    b.handleMouse(mouse("click", x + 1, y));
+    assert.equal(b.pendingKill(), "bg-2");
+    lines = b.render(80);
+    y = rowOf(lines, "[Cancel]");
+    b.handleMouse(mouse("click", 10, 5)); // the log: ignored while asking
+    assert.equal(b.pendingKill(), "bg-2");
+    b.handleMouse(mouse("click", lines[y]!.indexOf("[Cancel]") + 1, y));
+    assert.equal(b.pendingKill(), null);
+
+    // ...and [✗ Kill bg-2] confirms.
+    b.handleInput("k");
+    lines = b.render(80);
+    y = rowOf(lines, "[✗ Kill bg-2]");
+    b.handleMouse(mouse("click", lines[y]!.indexOf("[✗ Kill bg-2]") + 1, y));
+    assert.deepEqual(s.killed, ["bg-2"]);
+  } finally {
+    b.dispose();
+  }
+});
+
+test("a pending kill is dropped if the job ends on its own first", () => {
+  const j = job("bg-7", "running", "make", Date.now() - 1000);
+  const s = setup({ jobs: [j] });
+  const b = new JobBrowser(theme, s.src, { jobId: "bg-7" });
+  try {
+    b.handleInput("k");
+    assert.equal(b.pendingKill(), "bg-7");
+    j.status = "done";
+    j.endedAt = Date.now();
+    const lines = b.render(80);
+    assert.equal(b.pendingKill(), null);
+    assert.ok(!lines.some((l) => l.includes("[Cancel]")));
+    b.handleInput(KEY.enter);
+    assert.deepEqual(s.killed, []);
+  } finally {
+    b.dispose();
+  }
+});
+
+test("the ✕ in the top-right corner closes the overlay, from the list and from a job", () => {
+  for (const opts of [{}, { jobId: "bg-1" }]) {
+    const s = setup();
+    const b = new JobBrowser(theme, s.src, opts);
+    try {
+      const lines = b.render(80);
+      assert.equal(visibleWidth(lines[0]!), 80, "the top border keeps its width");
+      assert.match(lines[0]!, / ✕ ─╮$/);
+      const x = lines[0]!.indexOf("✕");
+      b.handleMouse(mouse("press", x, 0));
+      b.handleMouse(mouse("click", x, 0));
+      assert.equal(s.closed(), 1, `closed from ${JSON.stringify(opts)}`);
+      // A click a cell to its left counts too; the title does not.
+      b.handleMouse(mouse("click", x - 1, 0));
+      assert.equal(s.closed(), 2);
+      b.handleMouse(mouse("click", 5, 0));
+      assert.equal(s.closed(), 2);
+    } finally {
+      b.dispose();
+    }
   }
 });

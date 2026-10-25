@@ -167,6 +167,9 @@ export class JobBrowser implements Focusable {
   private autoScrollDir = 0;
   private autoScrollTimer: NodeJS.Timeout | null = null;
 
+  /** A kill waiting for a second yes: the job id. Every kill from the overlay asks first. */
+  private confirmId: string | null = null;
+
   // mouse layout, rebuilt by every render (overlay-local rows)
   private rowIds = new Map<number, string>();
   private buttons = new Map<number, Button[]>();
@@ -203,6 +206,11 @@ export class JobBrowser implements Focusable {
   /** Which view is showing, and for detail which job — for the extension and tests. */
   state(): { view: "list" | "detail"; jobId: string | null; query: string } {
     return { view: this.view, jobId: this.view === "detail" ? this.detailId : this.selectedId, query: this.input.getValue() };
+  }
+
+  /** The job a kill is waiting to be confirmed for, if any. */
+  pendingKill(): string | null {
+    return this.confirmId;
   }
 
   /** The currently selected log text, if any. */
@@ -312,17 +320,20 @@ export class JobBrowser implements Focusable {
 
   private activate(job: Job | undefined): void {
     if (!job) return;
-    if (this.mode === "kill") {
-      if (job.status === "running") this.src.kill(job);
-      this.src.close();
-      return;
-    }
-    this.openDetail(job.id);
+    if (this.mode === "kill") this.askKill(job);
+    else this.openDetail(job.id);
   }
 
-  private killDetail(): void {
-    const job = this.job(this.detailId);
+  /** A kill from the overlay is never one keypress or click away: ask first. */
+  private askKill(job: Job | undefined): void {
+    if (job && job.status === "running") this.confirmId = job.id;
+  }
+
+  private confirmKill(): void {
+    const job = this.job(this.confirmId);
+    this.confirmId = null;
     if (job && job.status === "running") this.src.kill(job);
+    if (this.mode === "kill") this.src.close();
   }
 
   private moveSelection(delta: number): void {
@@ -419,6 +430,13 @@ export class JobBrowser implements Focusable {
   // ── input ──────────────────────────────────────────────────────────
 
   handleInput(data: string): void {
+    if (this.confirmId) {
+      // While a kill waits for its yes, only yes or no count — and Esc means no, not "close".
+      if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "y" || data === "Y") this.confirmKill();
+      else if (matchesKey(data, "escape") || data === "n" || data === "N") this.confirmId = null;
+      this.src.requestRender();
+      return;
+    }
     if (matchesKey(data, "escape")) {
       this.src.close();
       return;
@@ -458,7 +476,7 @@ export class JobBrowser implements Focusable {
       this.follow = false;
     } else if (matchesKey(data, "end") || data === "G") this.follow = true;
     else if (matchesKey(data, "left") || matchesKey(data, "backspace") || data === "q") this.backToList();
-    else if (data === "k") this.killDetail();
+    else if (data === "k") this.askKill(this.job(this.detailId));
     else if (data === "y" || this.src.isCopyKey?.(data) || matchesKey(data, "ctrl+c")) this.copySelection();
   }
 
@@ -492,6 +510,12 @@ export class JobBrowser implements Focusable {
     }
 
     if (event.button !== "left") return { handled: true, render: false };
+
+    if (this.confirmId) {
+      // Only the buttons (yes, cancel, close) respond until the kill is answered.
+      if (event.type === "click") this.buttons.get(event.y)?.find((b) => event.x >= b.x0 && event.x < b.x1)?.action();
+      return { handled: true };
+    }
 
     if (event.type === "press") {
       if (this.inBody(event.x, event.y)) {
@@ -544,6 +568,7 @@ export class JobBrowser implements Focusable {
   render(width: number): string[] {
     this.rowIds.clear();
     this.buttons.clear();
+    if (this.confirmId && this.job(this.confirmId)?.status !== "running") this.confirmId = null; // it ended meanwhile
     const w = Math.max(24, width);
     if (this.view === "detail") {
       const job = this.job(this.detailId);
@@ -568,9 +593,12 @@ export class JobBrowser implements Focusable {
         const body = fit(content, contentW);
         return `${border("│")}${bg ? th.bg(bg, ` ${body} `) : ` ${body} `}${border("│")}`;
       },
+      // "╭─ title ─────── ✕ ─╮": the ✕ closes the overlay. It is clickable a cell either side.
       top: (left: string) => {
-        const l = truncateToWidth(` ${left} `, Math.max(1, inner - 2));
-        return border("╭─") + l + border(`${"─".repeat(Math.max(0, inner - 1 - visibleWidth(l)))}╮`);
+        const l = truncateToWidth(` ${left} `, Math.max(1, width - 8));
+        const fill = Math.max(0, width - 7 - visibleWidth(l));
+        this.buttons.set(0, [{ x0: width - 5, x1: width - 2, action: () => this.src.close() }]);
+        return border("╭─") + l + border("─".repeat(fill)) + ` ${th.fg("error", "✕")} ` + border("─╮");
       },
       sep: () => border(`├${"─".repeat(inner)}┤`),
       bottom: () => border(`╰${"─".repeat(inner)}╯`),
@@ -578,19 +606,30 @@ export class JobBrowser implements Focusable {
   }
 
   /** Lay buttons out left to right in a hint row, recording their columns for clicks. */
-  private buttonRow(y: number, items: Array<{ label: string; action: () => void }>, rest: string): string {
-    const th = this.theme;
+  private buttonRow(y: number, items: Array<{ label: string; action: () => void; color?: string }>, rest: string): string {
     let x = CONTENT_X;
     const parts: string[] = [];
     const hits: Button[] = [];
     for (const it of items) {
       const label = `[${it.label}]`;
       hits.push({ x0: x, x1: x + visibleWidth(label), action: it.action });
-      parts.push(th.fg("accent", label));
+      parts.push(this.theme.fg(it.color ?? "accent", label));
       x += visibleWidth(label) + 1;
     }
     this.buttons.set(y, hits);
-    return [...parts, th.fg("dim", rest)].join(" ");
+    return [...parts, rest].join(" ");
+  }
+
+  /** The row that asks "kill this job?" in place of a view's hint row. */
+  private confirmRow(y: number): string {
+    const job = this.job(this.confirmId)!;
+    const th = this.theme;
+    const question = th.fg("warning", `Stop ${job.id} (${oneLine(job.command, 40)}) and its process tree?`);
+    const buttons = [
+      { label: `✗ Kill ${job.id}`, action: () => this.confirmKill(), color: "error" },
+      { label: "Cancel", action: () => (this.confirmId = null) },
+    ];
+    return this.buttonRow(y, buttons, `${question} ${th.fg("dim", "enter/y kill · esc/n cancel")}`);
   }
 
   /** "⟳ running  ✓ done  ✗ failed  ◼ killed  ◼ orphaned", each in its own color. */
@@ -660,7 +699,7 @@ export class JobBrowser implements Focusable {
       this.mode === "kill"
         ? `↑↓ select · enter/click kill · type to search · esc close${pos}`
         : `↑↓ select · enter/click open · type to search · esc close${pos}`;
-    lines.push(f.row(th.fg("dim", hint)));
+    lines.push(f.row(this.confirmId ? this.confirmRow(lines.length) : th.fg("dim", hint)));
     lines.push(f.bottom());
     return lines;
   }
@@ -735,10 +774,10 @@ export class JobBrowser implements Focusable {
         ? `${this.scroll + 1}-${Math.min(body.length, this.scroll + this.bodyRows)}/${body.length}${this.follow && running ? " · following" : ""}`
         : `${body.length} line${body.length === 1 ? "" : "s"}`;
     const buttons = [{ label: "‹ back", action: () => this.backToList() }];
-    if (running) buttons.push({ label: "✗ kill", action: () => this.killDetail() });
+    if (running) buttons.push({ label: "✗ kill", action: () => this.askKill(job) });
     const copyHint = this.src.copyOnSelect?.() === false ? `drag to select, ${this.src.copyKeyLabel ?? "y"} copy` : "drag to copy";
     const keys = `↑↓ scroll · ${copyHint} · ← back${running ? " · k kill" : ""} · esc close`;
-    lines.push(f.row(this.buttonRow(lines.length, buttons, `${keys} · ${pos}`)));
+    lines.push(f.row(this.confirmId ? this.confirmRow(lines.length) : this.buttonRow(lines.length, buttons, th.fg("dim", `${keys} · ${pos}`))));
     lines.push(f.bottom());
     return lines;
   }
