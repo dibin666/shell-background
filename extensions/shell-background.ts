@@ -124,6 +124,8 @@ export default function shellBackground(pi: ExtensionAPI) {
   // inside an in-flight tool call, so the timer must actually resolve rather than
   // let an otherwise-idle loop exit out from under it.
   const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  /** How long shell_kill waits for the exit: past killTree's 3s SIGKILL escalation, so a SIGTERM-ignoring job is still reported once. */
+  const KILL_WAIT_MS = 3500;
 
   /**
    * The one auto-background threshold, computed once so the bash guideline and
@@ -337,6 +339,8 @@ export default function shellBackground(pi: ExtensionAPI) {
       return;
     }
     job.killedByUs = true;
+    job.stoppedByUser = true;
+    registry?.persist(job); // so an instance adopting it after /reload knows too
     killTree(job.pid);
     ctx.ui.notify(`Killing ${job.id}.`, "info");
   }
@@ -427,14 +431,17 @@ export default function shellBackground(pi: ExtensionAPI) {
   function deliver(job: Job): void {
     renderWidget();
     if (!settings.deliverResults) return;
+    const stoppedByUser = job.stoppedByUser === true;
     pi.sendMessage(
       {
         customType: DELIVERY_TYPE,
-        content: deliveryMessage(job.id, formatResult(job, settings.tailBytes, settings.tailLines)),
+        content: deliveryMessage(job.id, formatResult(job, settings.tailBytes, settings.tailLines), { stoppedByUser }),
         display: true,
         details: { id: job.id, status: job.status, exitCode: job.exitCode },
       },
-      { deliverAs: "followUp", triggerTurn: true },
+      // A job the user stopped by hand needs no answer: it rides along with the
+      // user's next message instead of waking the model for a turn (issue #3).
+      stoppedByUser ? { deliverAs: "nextTurn" } : { deliverAs: "followUp", triggerTurn: true },
     );
   }
 
@@ -817,7 +824,7 @@ export default function shellBackground(pi: ExtensionAPI) {
     promptSnippet: "Stop a backgrounded command",
     description: "Terminate a background command and its whole process tree by id.",
     parameters: Type.Object({ id: Type.String({ description: "Job id, e.g. bg-1" }) }),
-    async execute(_id: string, params: { id: string }): Promise<ToolResult> {
+    async execute(_id: string, params: { id: string }, sig?: AbortSignal): Promise<ToolResult> {
       if (!registry) return { content: [{ type: "text", text: "shell-background not initialized" }], details: {}, isError: true };
       const job = registry.get(params.id?.trim());
       if (!job) return { content: [{ type: "text", text: `No job "${params.id}".` }], details: {}, isError: true };
@@ -826,7 +833,37 @@ export default function shellBackground(pi: ExtensionAPI) {
       }
       job.killedByUs = true;
       killTree(job.pid);
-      return { content: [{ type: "text", text: `Killing ${job.id} (pid ${job.pid ?? "?"}) and its process tree.` }], details: { id: job.id } };
+      // The model asked for this kill, so it must not also get the result as a
+      // follow-up that wakes it for a turn of acknowledging it (issue #3). Wait
+      // for the exit, holding delivery back like a shell_status wait, and report
+      // it here. A poll of job.status, so an adopted job (no settle) works too.
+      waiters.set(job.id, (waiters.get(job.id) ?? 0) + 1);
+      try {
+        const deadline = Date.now() + KILL_WAIT_MS;
+        while (job.status === "running" && Date.now() < deadline && !sig?.aborted) await sleep(100);
+      } finally {
+        waiters.set(job.id, Math.max(0, (waiters.get(job.id) ?? 1) - 1));
+      }
+      if (isFinished(job)) {
+        job.delivered = true;
+        pending.delete(job);
+        registry.persist(job);
+        return {
+          content: [{ type: "text", text: `${formatResult(job, settings.tailBytes, settings.tailLines)}\n\n[stopped with shell_kill]` }],
+          details: { id: job.id, status: job.status, exitCode: job.exitCode },
+          structuredContent: structured(job),
+        };
+      }
+      // Still alive: its exit is news the model does not have, so delivery stays on.
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Kill signal sent to ${job.id} (pid ${job.pid ?? "?"}) and its process tree, but it had not exited after ${KILL_WAIT_MS / 1000}s. Its result is delivered when it exits; shell_status ${job.id} checks it.`,
+          },
+        ],
+        details: { id: job.id, status: job.status },
+      };
     },
   });
 

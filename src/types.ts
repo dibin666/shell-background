@@ -36,6 +36,12 @@ export interface Job {
   delivered: boolean;
   /** Set when we killed it (timeout/abort/shell_kill), so exit reads as killed. */
   killedByUs?: boolean;
+  /**
+   * Set when the user stopped it from the UI (/shell-bg kill, the job
+   * browser) rather than the model: its result then says so, and is handed to
+   * the model with the user's next message instead of waking it for a turn.
+   */
+  stoppedByUser?: boolean;
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

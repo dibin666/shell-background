@@ -63,6 +63,11 @@ A selection is copied the way pi copies one, through pi's clipboard path with it
 
 When a backgrounded command finishes in an **interactive** session, its result is pushed into the conversation as the next turn — you do not have to poll. Under headless `pi -p` there is nothing to deliver into (the session tears down when the prompt resolves), so **auto-background is disabled there** and only explicit `background: true` applies; collect it within the same turn with `shell_status { id, wait: N }`, which blocks (up to `N` seconds, 0–300) until the command finishes rather than returning immediately. This is the same delivery rule the rest of the suite lives by. A job's result is pushed only at the end of the current turn, not the instant the command exits, so a job you collect during the turn with `shell_status {id}` (with or without `wait`) is never also delivered as a follow-up — the model never spends a turn acknowledging a result it has just reported. A job nobody collects is delivered once when the turn ends, and a job that finishes while the agent is idle wakes it right away.
 
+A kill is never news to whoever asked for it:
+
+- **`shell_kill`** waits for the job to exit, up to 3.5s, past the 3s SIGTERM→SIGKILL escalation. It then reports the final status and output in its own result, and the job is not delivered again. A job still alive after the wait is delivered when it does exit.
+- **A job you stop from `/shell-bg`** (`kill`, or `k` / `[✗ kill]` in the browser) does not wake the model. Its result says the user stopped it, so the model does not take it for a crash and restart it. The message is handed to the model with your next message, using pi's `nextTurn` delivery.
+
 ## How it works
 
 Each command is spawned with its stdout and stderr piped into a single log file, drained on every chunk so nothing is lost no matter how much it prints, and finalized only after the pipes end (with a short grace so a daemonized grandchild that holds a handle open cannot truncate the tail). The process is spawned detached (POSIX) and `unref`'d so a running job never holds the host open, and killed as a whole process tree — `taskkill /T` on Windows, a process-group signal on POSIX — on timeout, abort, `shell_kill`, or session shutdown.

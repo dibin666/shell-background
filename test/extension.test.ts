@@ -768,3 +768,156 @@ test("a second /reload while an adopted job runs does not touch the stale ctx (c
     await rmDir(regDir);
   }
 });
+
+// ── issue #3: a kill is reported once, and a manual kill never wakes the model ──
+
+/** A harness that also records sendMessage options, plus the /shell-bg command. */
+function killHarness(cwd: string, sid: string) {
+  const h = harness();
+  const opts: any[] = [];
+  (h.pi as any).sendMessage = (m: unknown, o: unknown) => {
+    h.sent.push(m);
+    opts.push(o);
+  };
+  const commands = new Map<string, any>();
+  (h.pi as any).registerCommand = (n: string, o: unknown) => commands.set(n, o);
+  const ctx = { ...(makeCtx(cwd, true, sid) as any), mode: "tui" } as ExtensionContext;
+  return { h, opts, commands, ctx };
+}
+
+const allStopped = (h: Harness) => async () =>
+  /^0 running/.test(String((await h.tools.get("shell_status")!.execute("p", {})).content[0].text));
+
+test("issue #3: shell_kill reports the kill in its result, and nothing is delivered after the turn", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sbg-kill3-"));
+  const { id: sid, regDir } = uniqueSession();
+  const { h, ctx } = killHarness(cwd, sid);
+  try {
+    shellBackground(h.pi);
+    await h.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctx);
+    await h.handlers.get("agent_start")!({ type: "agent_start" }, ctx);
+    const r = await h.tools.get("bash")!.execute("t1", { command: "sleep 60", background: true }, undefined, undefined, ctx);
+    const id = r.details.id as string;
+    const k = await h.tools.get("shell_kill")!.execute("t2", { id });
+    assert.equal(k.details.status, "killed", "shell_kill waited for the exit");
+    assert.match(k.content[0].text, new RegExp(`\\[${id} · killed`));
+    assert.match(k.content[0].text, /\[stopped with shell_kill\]/);
+    assert.equal(k.structuredContent?.status, "killed");
+    await h.handlers.get("agent_settled")!({ type: "agent_settled" }, ctx);
+    await sleep(50);
+    assert.equal(h.sent.length, 0, "the kill is not delivered again as a follow-up");
+  } finally {
+    await teardown(h, ctx);
+    await rmDir(cwd);
+    await rmDir(regDir);
+  }
+});
+
+test("issue #3: a job that ignores SIGTERM is still reported once, after the SIGKILL escalation", { skip: process.platform === "win32" }, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sbg-kill3-term-"));
+  const { id: sid, regDir } = uniqueSession();
+  const { h, ctx } = killHarness(cwd, sid);
+  try {
+    shellBackground(h.pi);
+    await h.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctx);
+    await h.handlers.get("agent_start")!({ type: "agent_start" }, ctx);
+    const r = await h.tools
+      .get("bash")!
+      .execute("t1", { command: "trap '' TERM; echo ready; while :; do sleep 0.1; done", background: true }, undefined, undefined, ctx);
+    // Kill only once the trap is set, or the shell dies to SIGTERM before it ever ignores it.
+    await waitFor(async () => /ready/.test(String((await h.tools.get("shell_status")!.execute("p", { id: r.details.id })).content[0].text)), 5000);
+    const started = Date.now();
+    const k = await h.tools.get("shell_kill")!.execute("t2", { id: r.details.id });
+    assert.equal(k.details.status, "killed");
+    assert.ok(Date.now() - started >= 2500, `it really ignored SIGTERM and died to the SIGKILL (${Date.now() - started}ms)`);
+    await h.handlers.get("agent_settled")!({ type: "agent_settled" }, ctx);
+    await sleep(50);
+    assert.equal(h.sent.length, 0);
+  } finally {
+    await teardown(h, ctx);
+    await rmDir(cwd);
+    await rmDir(regDir);
+  }
+});
+
+test("issue #3: shell_kill on a job adopted after /reload is reported once too", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sbg-kill3-adopt-"));
+  const { id: sid, regDir } = uniqueSession();
+  const a = killHarness(cwd, sid);
+  const b = killHarness(cwd, sid);
+  try {
+    shellBackground(a.h.pi);
+    await a.h.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, a.ctx);
+    const r = await a.h.tools.get("bash")!.execute("t1", { command: "sleep 60", background: true }, undefined, undefined, a.ctx);
+    const id = r.details.id as string;
+    await a.h.handlers.get("session_shutdown")!({ type: "session_shutdown", reason: "reload" }, a.ctx);
+    shellBackground(b.h.pi);
+    await b.h.handlers.get("session_start")!({ type: "session_start", reason: "reload" }, b.ctx);
+
+    await b.h.handlers.get("agent_start")!({ type: "agent_start" }, b.ctx);
+    const k = await b.h.tools.get("shell_kill")!.execute("t2", { id });
+    assert.equal(k.details.status, "killed", "the adoption poller's status flip is seen within the wait");
+    await b.h.handlers.get("agent_settled")!({ type: "agent_settled" }, b.ctx);
+    await sleep(1200); // one more adoption tick: it must not deliver either
+    assert.equal(b.h.sent.length + a.h.sent.length, 0);
+  } finally {
+    await teardown(b.h, b.ctx);
+    await rmDir(cwd);
+    await rmDir(regDir);
+  }
+});
+
+test("issue #3: a manual /shell-bg kill while idle tells the model with the next message, without starting a turn", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sbg-kill3-user-"));
+  const { id: sid, regDir } = uniqueSession();
+  const { h, opts, commands, ctx } = killHarness(cwd, sid);
+  try {
+    shellBackground(h.pi);
+    await h.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctx);
+    await h.handlers.get("agent_start")!({ type: "agent_start" }, ctx);
+    const r = await h.tools.get("bash")!.execute("t1", { command: "sleep 60", background: true }, undefined, undefined, ctx);
+    await h.handlers.get("agent_settled")!({ type: "agent_settled" }, ctx); // the turn is over: idle
+    const id = r.details.id as string;
+
+    await commands.get("shell-bg").handler(`kill ${id}`, ctx);
+    await waitFor(allStopped(h), 5000);
+    await waitFor(() => h.sent.length > 0, 2000);
+    assert.equal(h.sent.length, 1);
+    assert.deepEqual(opts[0], { deliverAs: "nextTurn" }, "queued for the next user message; no triggerTurn");
+    assert.match(h.sent[0].content, /stopped by the user/);
+    assert.match(h.sent[0].content, /The user stopped it themselves/);
+    assert.match(h.sent[0].content, /Do not restart it/);
+    assert.doesNotMatch(h.sent[0].content, /it has just finished/);
+
+    // shell_status says so too, should the model look.
+    const s = await h.tools.get("shell_status")!.execute("s", { id });
+    assert.match(s.content[0].text, new RegExp(`\\[${id} · killed · stopped by the user`));
+  } finally {
+    await teardown(h, ctx);
+    await rmDir(cwd);
+    await rmDir(regDir);
+  }
+});
+
+test("issue #3: a manual kill during a turn is held to the turn's end, then queued without a new turn", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sbg-kill3-user-turn-"));
+  const { id: sid, regDir } = uniqueSession();
+  const { h, opts, commands, ctx } = killHarness(cwd, sid);
+  try {
+    shellBackground(h.pi);
+    await h.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctx);
+    await h.handlers.get("agent_start")!({ type: "agent_start" }, ctx);
+    const r = await h.tools.get("bash")!.execute("t1", { command: "sleep 60", background: true }, undefined, undefined, ctx);
+    await commands.get("shell-bg").handler(`kill ${r.details.id}`, ctx);
+    await waitFor(allStopped(h), 5000);
+    await sleep(50);
+    assert.equal(h.sent.length, 0, "nothing mid-turn");
+    await h.handlers.get("agent_settled")!({ type: "agent_settled" }, ctx);
+    assert.equal(h.sent.length, 1);
+    assert.deepEqual(opts[0], { deliverAs: "nextTurn" });
+  } finally {
+    await teardown(h, ctx);
+    await rmDir(cwd);
+    await rmDir(regDir);
+  }
+});

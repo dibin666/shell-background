@@ -79,16 +79,22 @@ export function backgroundedResult(input: BackgroundedInput): BackgroundedResult
   };
 }
 
-/** How a finished background job introduces itself when it arrives unasked. */
-export function deliveryMessage(id: string, body: string): string {
-  return [
-    `<shell_background_result id="${id}">`,
-    body.trim(),
-    `</shell_background_result>`,
-    "",
-    `This is ${id}, a command you sent to the background; it has just finished and this is its result.`,
-    "Fold it into what you are doing. If you had already moved on, say what it changes — or that it changes nothing.",
-  ].join("\n");
+/**
+ * How a finished background job introduces itself when it arrives unasked.
+ * A job the user stopped by hand says so: without that, a bare "killed" reads
+ * like a crash, and the model may restart what the user just shut down.
+ */
+export function deliveryMessage(id: string, body: string, opts: { stoppedByUser?: boolean } = {}): string {
+  const note = opts.stoppedByUser
+    ? [
+        `This is ${id}, a command you sent to the background. The user stopped it themselves (from /shell-bg); this is its final output.`,
+        "It did not crash. Do not restart it unless the user asks; just take into account that it is no longer running.",
+      ]
+    : [
+        `This is ${id}, a command you sent to the background; it has just finished and this is its result.`,
+        "Fold it into what you are doing. If you had already moved on, say what it changes — or that it changes nothing.",
+      ];
+  return [`<shell_background_result id="${id}">`, body.trim(), `</shell_background_result>`, "", ...note].join("\n");
 }
 
 /** The custom-message type a delivered result travels under. */
