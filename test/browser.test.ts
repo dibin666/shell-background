@@ -265,9 +265,9 @@ test("each status has its own color, the run time ends the row, and a legend exp
     assert.match(row("bg-3"), /<error>✗ bg-3 failed \(exit 1\)/);
     assert.match(row("bg-4"), /<accent>◼ bg-4 killed/);
     assert.match(row("bg-5"), /<dim>◼ bg-5 orphaned/);
-    // The run time is the last thing in the row, in the row's color: done ran 2s, bg-2 is still going.
-    assert.match(row("bg-1"), /<success>\s*2s<\/> <border>│<\/>$/);
-    assert.match(row("bg-2"), /<warning>\s*40s<\/> <border>│<\/>$/);
+    // The run time ends the row's text, in the row's color, before the (empty) scrollbar column.
+    assert.match(row("bg-1"), /<success>\s*2s<\/> +<border>│<\/>$/);
+    assert.match(row("bg-2"), /<warning>\s*40s<\/> +<border>│<\/>$/);
     const legend = lines.find((l) => l.includes("running") && l.includes("orphaned") && l.includes("killed"))!;
     assert.match(legend, /<warning>⟳ running<\/>.*<success>✓ done<\/>.*<error>✗ failed<\/>.*<accent>◼ killed<\/>.*<dim>◼ orphaned<\/>/);
   } finally {
@@ -477,5 +477,81 @@ test("the ✕ in the top-right corner closes the overlay, from the list and from
     } finally {
       b.dispose();
     }
+  }
+});
+
+test("the list has a scrollbar that drags its view and jumps on a track press, never opening a row", () => {
+  const jobs = Array.from({ length: 40 }, (_, i) => job(`bg-${i + 1}`, "done", `cmd ${i + 1}`, Date.now() - (40 - i) * 10_000));
+  const { src } = setup({ jobs, rows: 20 });
+  const b = new JobBrowser(theme, src);
+  try {
+    let lines = b.render(80);
+    const top = rowOf(lines, "bg-40"); // the first job row: the track starts there
+    const bottom = rowOf(lines, "bg-34"); // 7 rows fit, so bg-34 ends the first page
+    assert.equal(lines[top]![77], "█", "the thumb starts at the top of the track");
+    assert.equal(lines[top + 1]![77], "░");
+    assert.equal(lines[bottom]![77], "░");
+
+    // Drag the thumb to the bottom of the track: the view jumps to the oldest
+    // jobs, keeping the selection on the same screen row.
+    assert.deepEqual(b.handleMouse(mouse("press", 77, top)), { handled: true, capture: true });
+    b.handleMouse(mouse("drag", 77, bottom));
+    b.handleMouse(mouse("release", 77, bottom));
+    lines = b.render(80);
+    assert.equal(b.state().jobId, "bg-7", "the selection kept its screen row at the end of the list");
+    assert.ok(lines.some((l) => l.includes("bg-1 ")), "the last job scrolled into view");
+    assert.equal(lines[rowOf(lines, "bg-1")]![77], "█", "the thumb sits at the bottom");
+
+    // A press on the track above the thumb jumps there (and is not a row
+    // press); the click it produces opens nothing.
+    b.handleMouse(mouse("press", 77, top));
+    b.handleMouse(mouse("release", 77, top));
+    b.handleMouse(mouse("click", 77, top));
+    assert.equal(b.state().view, "list", "clicking the bar never opens the row behind it");
+    assert.equal(b.state().jobId, "bg-40");
+    lines = b.render(80);
+    assert.equal(lines[top]![77], "█", "the track press scrolled back to the top");
+  } finally {
+    b.dispose();
+  }
+});
+
+test("the detail's scrollbar drags the log and jumps on a track press, never selecting text", () => {
+  const long = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`).join("\n");
+  const s = setup({ output: () => long, rows: 30 });
+  const b = new JobBrowser(theme, s.src, { jobId: "bg-2" });
+  try {
+    let lines = b.render(80);
+    assert.ok(lines.some((l) => l.includes("line 200")), "opens on the newest output");
+    const bodyTop = rowOf(lines, "line 187"); // the first log row: the track's top
+    const bodyBottom = rowOf(lines, "line 200"); // and its bottom
+    assert.equal(lines[bodyTop]![77], "░");
+    assert.equal(lines[bodyBottom]![77], "█", "following puts the thumb at the bottom");
+
+    // Grab the thumb and drag it to the top: the log is back at its start.
+    assert.deepEqual(b.handleMouse(mouse("press", 77, bodyBottom)), { handled: true, capture: true });
+    b.handleMouse(mouse("drag", 77, bodyTop));
+    lines = b.render(80);
+    assert.ok(lines.some((l) => l.includes("line 1 ")), "the drag scrolled to the top");
+    assert.equal(lines[bodyTop]![77], "█");
+    b.handleMouse(mouse("release", 77, bodyTop));
+
+    // A press on the track jumps the thumb there; still dragging after it.
+    b.handleMouse(mouse("press", 77, bodyTop + 6));
+    lines = b.render(80);
+    assert.ok(!lines.some((l) => l.includes("line 1 ")) && !lines.some((l) => l.includes("line 200")), "jumped to the middle");
+    b.handleMouse(mouse("drag", 77, bodyBottom));
+    b.handleMouse(mouse("release", 77, bodyBottom));
+    lines = b.render(80);
+    assert.ok(lines.some((l) => l.includes("line 200")), "dragged back to the tail");
+
+    // A click on the bar selects nothing and copies nothing.
+    b.handleMouse(mouse("press", 77, bodyTop));
+    b.handleMouse(mouse("release", 77, bodyTop));
+    b.handleMouse(mouse("click", 77, bodyTop, { clickCount: 2 }));
+    assert.equal(b.selectedText(), undefined);
+    assert.deepEqual(s.copied, []);
+  } finally {
+    b.dispose();
   }
 });

@@ -4,12 +4,14 @@
  *   list    every job (or, picking a job to kill, only running ones), newest
  *           first, filtered live by a search box that matches the id or the
  *           command. Each row is colored by its status and ends with how long
- *           the job ran. ↑↓ / wheel select, enter / click opens.
+ *           the job ran. ↑↓ / wheel select, enter / click opens, and a scrollbar
+ *           on the right edge drags the view when the list is taller than it.
  *   detail  one job: its command, status and its log history (cleaned),
- *           scrollable with ↑↓ / PgUp / PgDn / Home / End or the wheel, and
- *           following new output while scrolled to the bottom. Dragging the
- *           mouse selects log text (double-click a word, triple-click a line)
- *           and copies it through pi's own clipboard path.
+ *           scrollable with ↑↓ / PgUp / PgDn / Home / End, the wheel, or the
+ *           scrollbar on the right edge, and following new output while
+ *           scrolled to the bottom. Dragging the mouse selects log text
+ *           (double-click a word, triple-click a line) and copies it through
+ *           pi's own clipboard path.
  *
  * Esc closes the overlay from either view; ← / backspace / "‹ back" returns
  * from a job to the list. Every mouse action has a keyboard path, since pi
@@ -167,6 +169,16 @@ export class JobBrowser implements Focusable {
   private autoScrollDir = 0;
   private autoScrollTimer: NodeJS.Timeout | null = null;
 
+  // scrollbar state (both views share the one column at the right edge;
+  // geometry is rebuilt by every render, in overlay-local coordinates)
+  private barX = -1; // first column that counts as the bar: the bar cell, the inner pad and the border after it
+  private barTop = 0; // the track's first row
+  private barRows = 0; // the track's height — 0 while the view fits, so its edge stays plain rows
+  private barThumbY = 0; // the thumb's first row
+  private barThumbH = 0;
+  /** A scrollbar drag in progress: where inside the thumb the press landed. */
+  private barDrag: { grabOffset: number } | null = null;
+
   /** A kill waiting for a second yes: the job id. Every kill from the overlay asks first. */
   private confirmId: string | null = null;
 
@@ -305,6 +317,7 @@ export class JobBrowser implements Focusable {
     this.bodyKey = null;
     this.body = [];
     this.sel = null;
+    this.barDrag = null;
     this.input.focused = false;
   }
 
@@ -315,6 +328,7 @@ export class JobBrowser implements Focusable {
     this.sel = null;
     this.selecting = false;
     this.stopAutoScroll();
+    this.barDrag = null;
     this.input.focused = this.isFocused;
   }
 
@@ -427,6 +441,51 @@ export class JobBrowser implements Focusable {
     }
   }
 
+  // ── scrollbar ──────────────────────────────────────────────────────
+
+  /** Is (x, y) on the scrollbar? Only while the view is taller than its window. */
+  private onScrollbar(x: number, y: number): boolean {
+    return this.barRows > 0 && x >= this.barX && y >= this.barTop && y < this.barTop + this.barRows;
+  }
+
+  /**
+   * A press on the bar starts a drag — pi's own gesture: grabbing the thumb
+   * keeps the grabbed spot under the pointer, and pressing the track jumps
+   * the thumb so its middle lands on the press (and the drag goes on from
+   * there).
+   */
+  private pressScrollbar(y: number): void {
+    const onThumb = y >= this.barThumbY && y < this.barThumbY + this.barThumbH;
+    const grabOffset = onThumb ? y - this.barThumbY : Math.floor(this.barThumbH / 2);
+    if (!onThumb) this.scrollThumbTo(y, grabOffset);
+    this.barDrag = { grabOffset };
+  }
+
+  /** Scroll so the thumb point grabbed at `grabOffset` sits at row y. */
+  private scrollThumbTo(y: number, grabOffset: number): void {
+    const maxThumb = Math.max(0, this.barRows - this.barThumbH);
+    const thumbOffset = Math.max(0, Math.min(maxThumb, y - this.barTop - grabOffset));
+    const share = maxThumb === 0 ? 0 : thumbOffset / maxThumb;
+    if (this.view === "detail") {
+      const maxScroll = Math.max(0, this.body.length - this.bodyRows);
+      this.scroll = Math.round(share * maxScroll);
+      this.follow = false; // render() follows again once dragged back to the bottom
+    } else {
+      // The list has no free scroll: the view follows the selection, so moving
+      // it means moving the selection with it — keeping the selected row on
+      // the same screen row.
+      const list = this.filtered();
+      if (list.length === 0) return;
+      const maxOffset = Math.max(0, list.length - this.listRows);
+      const offset = Math.round(share * maxOffset);
+      const sel = Math.max(0, list.findIndex((j) => j.id === this.selectedId));
+      const screenRow = sel - this.listOffset;
+      this.listOffset = offset;
+      const next = Math.max(0, Math.min(list.length - 1, offset + screenRow));
+      this.selectedId = list[next]!.id;
+    }
+  }
+
   // ── input ──────────────────────────────────────────────────────────
 
   handleInput(data: string): void {
@@ -509,6 +568,19 @@ export class JobBrowser implements Focusable {
       }
     }
 
+    // A scrollbar drag owns the pointer until release, like a selection does.
+    if (this.barDrag) {
+      if (event.type === "drag") {
+        this.scrollThumbTo(event.y, this.barDrag.grabOffset);
+        return { handled: true };
+      }
+      if (event.type === "release" || event.type === "click") {
+        this.barDrag = null;
+        return { handled: true, render: false };
+      }
+      return { handled: true, render: false };
+    }
+
     if (event.button !== "left") return { handled: true, render: false };
 
     if (this.confirmId) {
@@ -518,6 +590,10 @@ export class JobBrowser implements Focusable {
     }
 
     if (event.type === "press") {
+      if (this.onScrollbar(event.x, event.y)) {
+        this.pressScrollbar(event.y);
+        return { handled: true, capture: true };
+      }
       if (this.inBody(event.x, event.y)) {
         const p = this.posAt(event.x, event.y);
         this.sel = { anchor: p, focus: p };
@@ -537,6 +613,9 @@ export class JobBrowser implements Focusable {
         this.src.requestRender();
         return { handled: true };
       }
+      // A click on the bar (press + release in place after its press) is a
+      // scroll, never a row open or a text click.
+      if (this.onScrollbar(event.x, event.y)) return { handled: true, render: false };
       if (this.view === "detail") {
         // Double-click selects a word, triple-click a row — and copies, like pi.
         const count = event.clickCount ?? 1;
@@ -568,6 +647,8 @@ export class JobBrowser implements Focusable {
   render(width: number): string[] {
     this.rowIds.clear();
     this.buttons.clear();
+    this.barX = -1;
+    this.barRows = 0; // each view sets its own below
     if (this.confirmId && this.job(this.confirmId)?.status !== "running") this.confirmId = null; // it ended meanwhile
     const w = Math.max(24, width);
     if (this.view === "detail") {
@@ -673,12 +754,25 @@ export class JobBrowser implements Focusable {
       const stW = Math.max(...list.map((j) => statusLabel(j).length));
       const times = new Map(list.map((j) => [j.id, elapsed(j, now)]));
       const timeW = Math.max(...[...times.values()].map((t) => t.length));
-      for (const j of list.slice(this.listOffset, this.listOffset + this.listRows)) {
+      // A one-column scrollbar when the list is taller than the view: the same
+      // column the detail uses for its log, and it drags just the same.
+      const scrollable = list.length > this.listRows;
+      const maxOffset = Math.max(0, list.length - this.listRows);
+      const thumbH = scrollable ? Math.max(1, Math.round((this.listRows * this.listRows) / list.length)) : 0;
+      const thumbTop = scrollable && maxOffset > 0 ? Math.round(((this.listRows - thumbH) * this.listOffset) / maxOffset) : 0;
+      this.barX = width - 3;
+      this.barTop = lines.length;
+      this.barRows = scrollable ? this.listRows : 0;
+      this.barThumbY = this.barTop + thumbTop;
+      this.barThumbH = thumbH;
+      const shown = list.slice(this.listOffset, this.listOffset + this.listRows);
+      for (let i = 0; i < shown.length; i++) {
+        const j = shown[i]!;
         const selected = j.id === this.selectedId;
         const c = statusColor(j);
         const left = `${selected ? "›" : " "} ${statusIcon(j)} ${j.id.padEnd(idW)} ${statusLabel(j).padEnd(stW)}  `;
         const time = (times.get(j.id) ?? "").padStart(timeW);
-        const cmdW = Math.max(1, f.contentW - visibleWidth(left) - timeW - 2);
+        const cmdW = Math.max(1, f.contentW - 2 - visibleWidth(left) - timeW - 2);
         const cmd = truncateToWidth(oneLine(j.command), cmdW);
         const gap = " ".repeat(Math.max(0, cmdW - visibleWidth(cmd)) + 2);
         const content =
@@ -687,8 +781,9 @@ export class JobBrowser implements Focusable {
           (selected ? th.fg("text", cmd) : th.fg("muted", cmd)) +
           gap +
           th.fg(c, time);
+        const bar = !scrollable ? " " : i >= thumbTop && i < thumbTop + thumbH ? th.fg("accent", "█") : th.fg("dim", "░");
         this.rowIds.set(lines.length, j.id);
-        lines.push(f.row(content, selected ? "selectedBg" : undefined));
+        lines.push(f.row(`${content} ${bar}`, selected ? "selectedBg" : undefined));
       }
     }
 
@@ -743,10 +838,16 @@ export class JobBrowser implements Focusable {
       for (let i = 1; i < this.bodyRows; i++) lines.push(f.row(""));
     } else {
       const range = this.selRange();
-      // A one-column scrollbar when the output is taller than the view.
+      // A one-column scrollbar when the output is taller than the view; it
+      // takes presses and drags like pi's own scrollbars.
       const scrollable = body.length > this.bodyRows;
       const thumbH = scrollable ? Math.max(1, Math.round((this.bodyRows * this.bodyRows) / body.length)) : 0;
       const thumbTop = scrollable && maxScroll > 0 ? Math.round(((this.bodyRows - thumbH) * this.scroll) / maxScroll) : 0;
+      this.barX = width - 3; // the last content column, where `bar` is drawn
+      this.barTop = this.bodyTop;
+      this.barRows = scrollable ? this.bodyRows : 0;
+      this.barThumbY = this.barTop + thumbTop;
+      this.barThumbH = thumbH;
       for (let i = 0; i < this.bodyRows; i++) {
         const idx = this.scroll + i;
         const raw = body[idx]?.text ?? "";
