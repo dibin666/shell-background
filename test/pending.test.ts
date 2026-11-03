@@ -45,3 +45,12 @@ test("delivery message wraps the body and explains itself", () => {
 test("delivery type is stable", () => {
   assert.equal(DELIVERY_TYPE, "pify-shell-background-result");
 });
+
+test("a job the user stopped says so, and asks the model not to restart it", () => {
+  const m = deliveryMessage("bg-3", "[bg-3 · killed · stopped by the user · 4s]", { stoppedByUser: true });
+  assert.match(m, /<shell_background_result id="bg-3">/);
+  assert.match(m, /The user stopped it themselves/);
+  assert.match(m, /did not crash/);
+  assert.match(m, /Do not restart it unless the user asks/);
+  assert.ok(!/it has just finished/.test(m));
+});

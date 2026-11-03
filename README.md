@@ -30,11 +30,45 @@ shell_status                             # list every background command this se
 shell_kill { id: "bg-2" }                # stop it and its whole process tree
 ```
 
-`/shell-bg` lists the jobs; `/shell-bg kill bg-2` stops one.
+### `/shell-bg`
+
+| Command | What it does |
+|---|---|
+| `/shell-bg tui` or `/shell-bg status` | Opens the job browser: a centered overlay listing every job with its status, searchable by id or command. |
+| `/shell-bg status bg-2` | Opens that job's output directly. |
+| `/shell-bg kill` | Picks a running job to stop. |
+| `/shell-bg kill bg-2` | Stops that job and its whole process tree. |
+| `/shell-bg list` | Shows the job list as a notification. |
+
+A bare `/shell-bg` opens nothing; while you type it, the completion list shows the subcommands.
+
+The arguments autocomplete. Subcommands come first (`tui`, `status`, `kill`, `list`), then job ids: `kill` offers only jobs that are still running, and `status` offers every job, with its status icon and command. Accepting `kill` or `status` from the list opens the job list straight away, and Tab after them lists jobs, not file paths.
+
+In the browser, each job's row is colored by its status, and a legend under the list names the colors: running, done, failed, killed, orphaned (its session ended). Each row ends with how long the job ran. ↑↓ moves the selection, typing filters, Enter opens a job, and Esc or the ✕ in the top-right corner closes.
+
+A job's view shows its log history, up to the last 2 MiB, which is more than the tail the model sees. ↑↓, PgUp/PgDn and Home/End scroll it, and it follows new lines while you are at the bottom. ← or Backspace goes back to the list, and `k` kills a running job.
+
+A kill from the overlay always asks first. This covers `k`, `[✗ kill]`, and Enter or a click in `/shell-bg kill`'s picker. The bottom row turns into `[✗ Kill bg-2] [Cancel]` with the job's command. Enter, `y` or the Kill button stops the job. Esc, `n` or Cancel keeps it, and Esc here does not close the overlay. A `/shell-bg kill bg-2` typed with its id is already deliberate, so it stops the job without asking.
+
+The overlay's size follows the terminal. Its width is a share of the terminal's width. The list is as tall as its jobs, up to about 70% of the terminal rows. A job's view is always exactly that 70%, however short or long its log, so the window does not jump while output streams in. A resize changes both.
+
+In pi's fullscreen mode (the default) the mouse works too:
+
+- The wheel scrolls.
+- A click opens a job or presses `[‹ back]` / `[✗ kill]`, and a click on the ✕ closes the overlay.
+- A click on a job row in the widget above the editor opens that job's output.
+- Dragging over the log selects text. Double-click selects a word, triple-click a row.
+
+A selection is copied the way pi copies one, through pi's clipboard path with its "Copied!" flash. It follows pi's `fullscreenCopyOnSelect` setting: on release, or with pi's copy key (`app.message.copy`, `ctrl+x` by default) when that setting is off. The overlay draws its own selection, so a selection spanning rows copies only the log text, without the window's border or the screen behind it. pi passes mouse events only in fullscreen mode, so every action except selecting text also has a key.
 
 ## Delivery, and the headless caveat
 
 When a backgrounded command finishes in an **interactive** session, its result is pushed into the conversation as the next turn — you do not have to poll. Under headless `pi -p` there is nothing to deliver into (the session tears down when the prompt resolves), so **auto-background is disabled there** and only explicit `background: true` applies; collect it within the same turn with `shell_status { id, wait: N }`, which blocks (up to `N` seconds, 0–300) until the command finishes rather than returning immediately. This is the same delivery rule the rest of the suite lives by. A job's result is pushed only at the end of the current turn, not the instant the command exits, so a job you collect during the turn with `shell_status {id}` (with or without `wait`) is never also delivered as a follow-up — the model never spends a turn acknowledging a result it has just reported. A job nobody collects is delivered once when the turn ends, and a job that finishes while the agent is idle wakes it right away.
+
+A kill is never news to whoever asked for it:
+
+- **`shell_kill`** waits for the job to exit, up to 3.5s, past the 3s SIGTERM→SIGKILL escalation. It then reports the final status and output in its own result, and the job is not delivered again. A job still alive after the wait is delivered when it does exit.
+- **A job you stop from `/shell-bg`** (`kill`, or `k` / `[✗ kill]` in the browser) does not wake the model. Its result says the user stopped it, so the model does not take it for a crash and restart it. The message is handed to the model with your next message, using pi's `nextTurn` delivery.
 
 ## How it works
 
